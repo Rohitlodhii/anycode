@@ -2,7 +2,7 @@
 
 A desktop AI coding assistant built on Electron. Anycode pairs a full Monaco code editor with an AI chat panel powered by OpenAI Codex, letting you browse, edit, and talk about your projects without leaving the app.
 
-![Demo](images/demo.png)
+
 
 ## What it does
 

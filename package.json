@@ -1,6 +1,6 @@
 {
-  "name": "electron-shadcn",
-  "productName": "electron-shadcn Template",
+  "name": "anycode",
+  "productName": "anycode",
   "version": "1.4.0",
   "description": "Anycode — a desktop AI coding assistant powered by OpenAI Codex, Monaco editor, and Electron.",
   "main": ".vite/build/main.js",
