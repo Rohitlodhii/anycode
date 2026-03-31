@@ -2,7 +2,7 @@
   "name": "electron-shadcn",
   "productName": "electron-shadcn Template",
   "version": "1.4.0",
-  "description": "Electron Forge with shadcn-ui (Vite + Typescript)",
+  "description": "Anycode — a desktop AI coding assistant powered by OpenAI Codex, Monaco editor, and Electron.",
   "main": ".vite/build/main.js",
   "private": true,
   "scripts": {
@@ -21,8 +21,7 @@
     "test:e2e": "playwright test",
     "test:all": "vitest run && playwright test"
   },
-  "author": "ROG <luanroger.dev@gmail.com>",
-  "license": "MIT",
+  "author": "rohitlodhi <rohitlodhi0225@gmail.com>",
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.8",
     "@fontsource-variable/geist-mono": "^5.2.7",
