@@ -9,6 +9,7 @@ import type {
   CodexSessionReadyPayload,
   CodexTurnInterruptPayload,
   CodexTurnSteerPayload,
+  EditorOpenFilePayload,
 } from "./types/codex-bridge";
 
 window.addEventListener("message", (event) => {
@@ -25,6 +26,8 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.invoke("editor:openProject", folderPath),
   getEditorFolder: () => ipcRenderer.invoke("editor:getFolder"),
   getRecentProjects: () => ipcRenderer.invoke("projects:getRecent"),
+  removeRecentProject: (projectPath: string) =>
+    ipcRenderer.invoke("projects:removeRecent", projectPath),
   onEditorFolder: (callback: (folderPath: string) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, folderPath: string) => {
       callback(folderPath);
@@ -48,6 +51,8 @@ contextBridge.exposeInMainWorld("api", {
   delete: (targetPath: string) => ipcRenderer.invoke("fs:delete", targetPath),
   move: (sourcePath: string, destinationFolder: string) =>
     ipcRenderer.invoke("fs:move", sourcePath, destinationFolder),
+  listFiles: (rootPath: string): Promise<string[]> =>
+    ipcRenderer.invoke("fs:listFiles", rootPath),
   minimizeWindow: () => ipcRenderer.invoke("window:minimize"),
   toggleMaximizeWindow: () => ipcRenderer.invoke("window:toggleMaximize"),
   closeWindow: () => ipcRenderer.invoke("window:close"),
@@ -83,8 +88,8 @@ contextBridge.exposeInMainWorld("codex", {
   },
   respondToRequest: (response: CodexRequestResponse) =>
     ipcRenderer.invoke("codex:request:respond", response),
-  sendMessage: (agentId: string, text: string, model?: string | null) =>
-    ipcRenderer.invoke("codex:agent:send", { agentId, model, text }),
+  sendMessage: (agentId: string, text: string, model?: string | null, collaborationMode?: string | null, approvalPolicy?: string | null, effort?: string | null, attachments?: string[]) =>
+    ipcRenderer.invoke("codex:agent:send", { agentId, model, text, collaborationMode, approvalPolicy, effort, attachments }),
   createSession: (sessionId: string, cwd: string): Promise<CodexAgentSession> =>
     ipcRenderer.invoke("codex:session:create", { sessionId, cwd }),
   rpcCall: (agentId: string, method: string, params: unknown): Promise<unknown> =>
@@ -100,6 +105,29 @@ contextBridge.exposeInMainWorld("codex", {
     ipcRenderer.on("codex:session:ready", handler);
     return () => {
       ipcRenderer.removeListener("codex:session:ready", handler);
+    };
+  },
+});
+
+contextBridge.exposeInMainWorld("editor", {
+  openFile: (payload: EditorOpenFilePayload): Promise<void> =>
+    ipcRenderer.invoke("editor:openFile", payload),
+  onOpenFile: (callback: (payload: EditorOpenFilePayload) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: EditorOpenFilePayload) => {
+      callback(payload);
+    };
+    ipcRenderer.on("editor:openFile", handler);
+    return () => {
+      ipcRenderer.removeListener("editor:openFile", handler);
+    };
+  },
+  onFileChanged: (callback: (payload: { path: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: { path: string }) => {
+      callback(payload);
+    };
+    ipcRenderer.on("file:changed", handler);
+    return () => {
+      ipcRenderer.removeListener("file:changed", handler);
     };
   },
 });

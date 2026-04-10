@@ -3,20 +3,26 @@ import {
   Archive,
   Bot,
   ChevronDown,
+  Eye,
   FolderOpen,
   GitFork,
   History,
   Layers,
   Loader2,
+  MessageSquare,
   Plus,
   RefreshCw,
   RotateCcw,
   Server,
   ShieldAlert,
+  ShieldCheck,
+  ShieldOff,
   Sparkles,
   Square,
   Terminal,
+  Zap,
 } from "lucide-react";
+import { toast } from "sonner";
 import { openExternalLink } from "@/actions/shell";
 import { AuthStatusBadge } from "@/components/codex/auth-status-badge";
 import { RateLimitIndicator, UsageLimitBanner } from "@/components/codex/rate-limit-indicator";
@@ -24,15 +30,25 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ContextCompactionBanner } from "@/components/codex/items/context-compaction-banner";
 import { CommandCard } from "@/components/codex/items/command-card";
 import { FileChangeCard } from "@/components/codex/items/file-change-card";
+import { FuzzyFileSearchCard } from "@/components/codex/items/fuzzy-file-search-card";
 import { McpToolCard } from "@/components/codex/items/mcp-tool-card";
 import { PlanCard } from "@/components/codex/items/plan-card";
 import { ReasoningBlock } from "@/components/codex/items/reasoning-block";
+import { TurnDiffCard } from "@/components/codex/items/turn-diff-card";
 import { WebSearchCard } from "@/components/codex/items/web-search-card";
 import { MarkdownRenderer } from "@/components/codex/markdown-renderer";
 import { McpStatusPanel } from "@/components/codex/mcp-status-panel";
 import { ThreadHistoryPanel } from "@/components/codex/thread-history-panel";
 import { SkillBadge, SkillsPicker, useSkillsPicker, type Skill } from "@/components/codex/skills-picker";
+import { AtFileMentionCard, useAtFileMention } from "@/components/codex/at-file-mention";
+import { SlashCommandCard, useSlashCommands } from "@/components/codex/slash-commands";
 import { AI_Prompt } from "@/components/ui/animated-ai-input";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -52,8 +68,15 @@ import type { CodexRequestResponse } from "@/types/codex-bridge";
 import { cn } from "@/utils/tailwind";
 import {
   useSessionStore,
+  filterReasoningEfforts,
+  applyModelChangeEffort,
+  ALL_REASONING_EFFORTS,
   type ChatMessage,
   type TurnItem,
+  type TimelineEntry,
+  type ReasoningEffort,
+  type CollaborationModeKind,
+  type ApprovalPolicyKind,
 } from "@/stores/session-store";
 
 type CodexChatPanelProps = {
@@ -72,8 +95,13 @@ export function CodexChatPanel({ sessionId, projectPath }: CodexChatPanelProps) 
   const setSessionReady = useSessionStore((state) => state.setSessionReady);
   const setSessionError = useSessionStore((state) => state.setSessionError);
   const appendMessage = useSessionStore((state) => state.appendMessage);
+  const setStreaming = useSessionStore((state) => state.setStreaming);
+  const setCurrentTurnId = useSessionStore((state) => state.setCurrentTurnId);
   const setAuthState = useSessionStore((state) => state.setAuthState);
   const setRateLimits = useSessionStore((state) => state.setRateLimits);
+  const setCollaborationMode = useSessionStore((state) => state.setCollaborationMode);
+  const setApprovalPolicy = useSessionStore((state) => state.setApprovalPolicy);
+  const setReasoningEffort = useSessionStore((state) => state.setReasoningEffort);
 
   const [pendingAnswers, setPendingAnswers] = useState<Record<string, string>>({});
   const [steerInput, setSteerInput] = useState("");
@@ -82,10 +110,26 @@ export function CodexChatPanel({ sessionId, projectPath }: CodexChatPanelProps) 
   const [inputValue, setInputValue] = useState("");
   const [mcpPanelOpen, setMcpPanelOpen] = useState(false);
   const [threadHistoryOpen, setThreadHistoryOpen] = useState(false);
+  const [effortPickerOpen, setEffortPickerOpen] = useState(false);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [isStoppingTurn, setIsStoppingTurn] = useState(false);
   const skillsPicker = useSkillsPicker();
   const inputWrapperRef = useRef<HTMLDivElement>(null);
 
+  const slashCommands = useSlashCommands(inputValue, {
+    sessionId,
+    setCollaborationMode,
+    setApprovalPolicy,
+    openModelPicker: () => setModelPickerOpen(true),
+    openEffortPicker: () => setEffortPickerOpen(true),
+    openMcpPanel: () => setMcpPanelOpen(true),
+  });
+
+  const atFileMention = useAtFileMention(inputValue, projectPath, setInputValue);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const shouldAutoScrollRef = useRef(true);
 
   // Sessions for this project
   const projectSessions = useMemo(
@@ -105,6 +149,21 @@ export function CodexChatPanel({ sessionId, projectPath }: CodexChatPanelProps) 
     [session?.models]
   );
 
+  // Supported reasoning efforts for the currently selected model (Requirement 19.3)
+  const supportedEfforts = useMemo<ReasoningEffort[]>(() => {
+    if (!session?.models || !selectedModelLabel) return ALL_REASONING_EFFORTS;
+    const selectedModel = session.models.find((m) => m.label === selectedModelLabel) as
+      | (typeof session.models[0] & { supportedReasoningEfforts?: string[]; defaultReasoningEffort?: string })
+      | undefined;
+    if (!selectedModel?.supportedReasoningEfforts?.length) return ALL_REASONING_EFFORTS;
+    return filterReasoningEfforts({
+      supportedReasoningEfforts: selectedModel.supportedReasoningEfforts.map((e) => ({
+        reasoningEffort: e as ReasoningEffort,
+      })),
+      defaultReasoningEffort: (selectedModel.defaultReasoningEffort as ReasoningEffort) ?? "medium",
+    });
+  }, [session?.models, selectedModelLabel]);
+
   // Sync selected model label when session becomes ready
   useEffect(() => {
     if (session?.models && session.defaultModel) {
@@ -116,12 +175,40 @@ export function CodexChatPanel({ sessionId, projectPath }: CodexChatPanelProps) 
     }
   }, [session?.models, session?.defaultModel]);
 
+  // Reset reasoning effort when model changes and current effort is unsupported (Requirement 19.5)
+  useEffect(() => {
+    if (!session?.models || !selectedModelLabel) return;
+    const selectedModel = session.models.find((m) => m.label === selectedModelLabel) as
+      | (typeof session.models[0] & { supportedReasoningEfforts?: string[]; defaultReasoningEffort?: string })
+      | undefined;
+    if (!selectedModel?.supportedReasoningEfforts?.length) return;
+    const newEffort = applyModelChangeEffort(
+      {
+        supportedReasoningEfforts: selectedModel.supportedReasoningEfforts.map((e) => ({
+          reasoningEffort: e as ReasoningEffort,
+        })),
+        defaultReasoningEffort: (selectedModel.defaultReasoningEffort as ReasoningEffort) ?? "medium",
+      },
+      session.reasoningEffort
+    );
+    if (newEffort !== session.reasoningEffort) {
+      setReasoningEffort(sessionId, newEffort);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedModelLabel]);
+
   const messages = session?.messages ?? [];
   const items = session?.items ?? {};
+  const timeline = session?.timeline ?? [];
   const itemCount = Object.keys(items).length;
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    // Only auto-scroll if the user is already near the bottom.
+    if (!shouldAutoScrollRef.current) return;
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    // During streaming we avoid smooth scrolling to reduce layout contention.
+    el.scrollTop = el.scrollHeight;
   }, [messages.length, itemCount]);
 
   // Sync pendingAnswers when pendingRequest changes
@@ -245,7 +332,7 @@ export function CodexChatPanel({ sessionId, projectPath }: CodexChatPanelProps) 
     }
   }
 
-  async function handleSubmit(payload: { message: string; model: string }) {
+  async function handleSubmit(payload: { message: string; model: string; attachments?: string[] }) {
     if (!session || !isConnected) return;
 
     // Extract skill invocations from the message (e.g. $skill-name)
@@ -253,8 +340,18 @@ export function CodexChatPanel({ sessionId, projectPath }: CodexChatPanelProps) 
     const invokedSkillNames = skillMatches.map((m) => m[1]);
 
     const userMessageId = crypto.randomUUID();
+    // Find model ID by label, fallback to default model or first available model
     const selectedModelId =
-      session.models.find((m) => m.label === payload.model)?.id ?? null;
+      session.models.find((m) => m.label === payload.model)?.id ??
+      session.defaultModel ??
+      session.models[0]?.id ??
+      null;
+    
+    // If still no model, we can't send the message
+    if (!selectedModelId) {
+      setSessionError(sessionId, "No model available");
+      return;
+    }
 
     appendMessage(sessionId, {
       id: userMessageId,
@@ -268,7 +365,15 @@ export function CodexChatPanel({ sessionId, projectPath }: CodexChatPanelProps) 
     skillsPicker.dismiss();
 
     try {
-      await window.codex.sendMessage(sessionId, payload.message, selectedModelId);
+      await window.codex.sendMessage(
+        sessionId,
+        payload.message,
+        selectedModelId,
+        session.collaborationMode,
+        session.approvalPolicy,
+        session.reasoningEffort,
+        payload.attachments,
+      );
     } catch (err) {
       setSessionError(
         sessionId,
@@ -278,11 +383,22 @@ export function CodexChatPanel({ sessionId, projectPath }: CodexChatPanelProps) 
   }
 
   async function handleStop() {
-    if (!currentTurnId || !threadId) return;
+    if (!currentTurnId || !threadId || isStoppingTurn) return;
+    
+    setIsStoppingTurn(true);
+    
     try {
       await window.codex.interruptTurn(sessionId, threadId, currentTurnId);
+      toast.success("Turn interrupted successfully");
+      // Update state after successful interruption
+      setStreaming(sessionId, false);
+      setCurrentTurnId(sessionId, null);
     } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "Failed to interrupt turn";
+      toast.error(errorMessage);
       console.error("Failed to interrupt turn", err);
+    } finally {
+      setIsStoppingTurn(false);
     }
   }
 
@@ -366,19 +482,44 @@ export function CodexChatPanel({ sessionId, projectPath }: CodexChatPanelProps) 
     return "Idle";
   })();
 
-  // Ordered items for display (insertion order via Object.values)
-  const orderedItems = Object.values(items);
+  const orderedTimeline = useMemo(() => {
+    return [...timeline].sort((a, b) => a.createdAt - b.createdAt);
+  }, [timeline]);
+
+  const processingEntries = useMemo(
+    () =>
+      orderedTimeline.filter(
+        (entry) =>
+          entry.kind === "item" &&
+          Boolean(items[entry.id]) &&
+          isProcessingTurnItem(items[entry.id])
+      ),
+    [orderedTimeline, items]
+  );
+
+  const processingItemIds = useMemo(
+    () => new Set(processingEntries.map((entry) => entry.id)),
+    [processingEntries]
+  );
+
+  const processingItems = useMemo(
+    () =>
+      processingEntries
+        .map((entry) => items[entry.id])
+        .filter((item): item is TurnItem => Boolean(item)),
+    [processingEntries, items]
+  );
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.06),transparent_48%),linear-gradient(180deg,rgba(255,255,255,0.02),transparent_45%)]">
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.06),transparent_48%),linear-gradient(180deg,rgba(255,255,255,0.02),transparent_45%)]">
       {/* Header */}
-      <div className="border-b border-border/70 px-6 py-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
+      <div className="shrink-0 border-b border-border/70 px-6 py-4">
+        <div className="flex w-full flex-wrap items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
             <div className="flex size-10 items-center justify-center rounded-2xl border border-border/70 bg-background/80 shadow-sm">
               <Sparkles className="size-4 text-foreground" />
             </div>
-            <div>
+            <div className="min-w-0">
               {/* Session selector */}
               <SessionSelector
                 sessions={projectSessions}
@@ -393,7 +534,7 @@ export function CodexChatPanel({ sessionId, projectPath }: CodexChatPanelProps) 
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
             {/* Thread actions */}
             {isConnected && (
               <DropdownMenu>
@@ -517,29 +658,55 @@ export function CodexChatPanel({ sessionId, projectPath }: CodexChatPanelProps) 
       </Dialog>
 
       {/* Body */}
-      <div className="min-h-0 flex-1 px-6 py-5">
-        <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[1.5rem] border border-border/70 bg-background/70 shadow-[0_30px_80px_-50px_rgba(0,0,0,0.7)] backdrop-blur">
-          {/* Message list */}
-          <div className="editor-sidebar-scroll min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-5">
-            {messages.map((message, index) => (
-              <ChatBubble
-                key={message.id}
-                message={message}
-                isLastAssistant={
-                  message.role === "assistant" &&
-                  index === messages.length - 1 &&
-                  isStreaming
+      <div className="min-h-0 flex flex-1 flex-col px-6 pb-5 pt-4">
+        <div className="mx-auto flex h-full w-full max-w-4xl min-h-0 flex-col">
+          {/* Message + item list (interleaved) */}
+          <div
+            className="editor-sidebar-scroll min-h-0 flex-1 space-y-4 overflow-y-auto px-1 py-3"
+            ref={scrollContainerRef}
+            onScroll={() => {
+              const el = scrollContainerRef.current;
+              if (!el) return;
+              const thresholdPx = 120;
+              const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+              shouldAutoScrollRef.current = distanceFromBottom < thresholdPx;
+            }}
+          >
+            {processingItems.length > 0 && (
+              <ProcessingAccordion items={processingItems} />
+            )}
+
+            {(() => {
+              let hasShownAssistantLabel = false;
+              return orderedTimeline.map((entry) => {
+                if (entry.kind === "item" && processingItemIds.has(entry.id)) {
+                  return null;
                 }
-              />
-            ))}
 
-            {/* Turn items */}
-            {orderedItems.map((item) => (
-              <TurnItemDisplay key={item.id} item={item} />
-            ))}
+                let showAssistantLabel = false;
+                if (entry.kind === "message") {
+                  const message = messages.find((m) => m.id === entry.id);
+                  if (message?.role === "assistant" && !hasShownAssistantLabel) {
+                    showAssistantLabel = true;
+                    hasShownAssistantLabel = true;
+                  }
+                }
 
-            {messages.length === 0 && orderedItems.length === 0 && (
-              <div className="rounded-2xl border border-dashed border-border/70 bg-muted/20 px-4 py-5 text-sm text-muted-foreground">
+                return (
+                  <TimelineRow
+                    entry={entry}
+                    isStreaming={isStreaming}
+                    items={items}
+                    key={`${entry.kind}:${entry.id}`}
+                    messages={messages}
+                    showAssistantLabel={showAssistantLabel}
+                  />
+                );
+              });
+            })()}
+
+            {messages.length === 0 && Object.keys(items).length === 0 && (
+              <div className="px-4 py-3 text-sm text-muted-foreground">
                 Ask Codex to inspect this repo, explain code, or make changes in the
                 current project.
               </div>
@@ -563,7 +730,7 @@ export function CodexChatPanel({ sessionId, projectPath }: CodexChatPanelProps) 
 
           {/* Approval panel */}
           {pendingRequest && (
-            <div className="border-t border-border/70 bg-muted/20 px-5 py-4">
+            <div className="border-t border-border/70 bg-muted/10 px-1 py-4">
               <div className="rounded-2xl border border-amber-500/25 bg-amber-500/8 p-4">
                 <div className="flex items-start gap-3">
                   <div className="mt-0.5 flex size-8 items-center justify-center rounded-xl bg-amber-500/12 text-amber-200">
@@ -657,7 +824,7 @@ export function CodexChatPanel({ sessionId, projectPath }: CodexChatPanelProps) 
 
           {/* Steer input while streaming */}
           {isStreaming && (
-            <div className="border-t border-border/70 bg-background/85 px-4 py-3">
+            <div className="border-t border-border/70 bg-background/40 px-1 py-3 backdrop-blur-sm">
               <div className="flex items-center gap-2">
                 <Input
                   className="flex-1 h-8 text-sm"
@@ -686,9 +853,14 @@ export function CodexChatPanel({ sessionId, projectPath }: CodexChatPanelProps) 
                   variant="destructive"
                   className="h-8 gap-1.5 text-xs"
                   onClick={() => void handleStop()}
+                  disabled={isStoppingTurn}
                   type="button"
                 >
-                  <Square className="size-3" />
+                  {isStoppingTurn ? (
+                    <Loader2 className="size-3 animate-spin" />
+                  ) : (
+                    <Square className="size-3" />
+                  )}
                   Stop
                 </Button>
               </div>
@@ -697,7 +869,7 @@ export function CodexChatPanel({ sessionId, projectPath }: CodexChatPanelProps) 
 
           {/* Error reconnect */}
           {isError && (
-            <div className="border-t border-border/70 bg-red-500/5 px-5 py-3">
+            <div className="border-t border-border/70 bg-red-500/5 px-1 py-3">
               <div className="flex items-center gap-3">
                 <AlertCircle className="size-4 text-red-400 shrink-0" />
                 <span className="flex-1 text-xs text-red-400 truncate">
@@ -718,43 +890,93 @@ export function CodexChatPanel({ sessionId, projectPath }: CodexChatPanelProps) 
           )}
 
           {/* Input bar */}
-          <div className="border-t border-border/70 bg-background/85 px-4 py-4">
-            {/* Skills picker popover */}
-            {skillsPicker.isOpen && skills.length > 0 && (
-              <SkillsPicker
-                skills={skills}
-                query={skillsPicker.query}
-                onSelect={(skill) => {
-                  const updated = skillsPicker.selectSkill(skill, inputValue);
-                  setInputValue(updated);
-                  skillsPicker.dismiss();
+          <div className="shrink-0 sticky bottom-0 z-10 mt-3 bg-linear-to-t from-background via-background/95 to-transparent px-0 pb-1 pt-4">
+            {/* Input wrapper — position:relative so SlashCommandCard can anchor to it */}
+            <div className="relative" ref={inputWrapperRef}>
+              {/* Slash command card — appears above the input bar (Requirement 20.1, 20.5) */}
+              {slashCommands.isOpen && slashCommands.filtered.length > 0 && (
+                <SlashCommandCard
+                  commands={slashCommands.filtered}
+                  selectedIndex={slashCommands.selectedIndex}
+                  onSelect={(cmd) => {
+                    cmd.action();
+                    setInputValue("");
+                    slashCommands.dismiss();
+                  }}
+                  anchorRef={inputWrapperRef}
+                />
+              )}
+              {/* At-file mention card — appears above the input bar */}
+              {atFileMention.isOpen && (
+                <AtFileMentionCard
+                  suggestions={atFileMention.suggestions}
+                  selectedIndex={atFileMention.selectedIndex}
+                  onSelect={(suggestion) => atFileMention.onSelect(suggestion)}
+                  anchorRef={inputWrapperRef}
+                  fileIndexEmpty={atFileMention.fileIndexEmpty}
+                />
+              )}
+              {/* Skills picker popover */}
+              {skillsPicker.isOpen && skills.length > 0 && (
+                <SkillsPicker
+                  skills={skills}
+                  query={skillsPicker.query}
+                  onSelect={(skill) => {
+                    const updated = skillsPicker.selectSkill(skill, inputValue);
+                    setInputValue(updated);
+                    skillsPicker.dismiss();
+                  }}
+                  onDismiss={skillsPicker.dismiss}
+                  anchorRef={inputWrapperRef}
+                />
+              )}
+              <AI_Prompt
+                className="max-w-none py-0"
+                disabled={!isConnected || isStreaming}
+                footerControls={
+                  isConnected ? (
+                    <InputFooterControls
+                      approvalPolicy={session?.approvalPolicy ?? "untrusted"}
+                      collaborationMode={session?.collaborationMode ?? "default"}
+                      effortPickerOpen={effortPickerOpen}
+                      onApprovalPolicyChange={(policy) => setApprovalPolicy(sessionId, policy)}
+                      onCollaborationModeChange={(mode) => setCollaborationMode(sessionId, mode)}
+                      onEffortPickerOpenChange={setEffortPickerOpen}
+                      onReasoningEffortChange={(effort) => setReasoningEffort(sessionId, effort)}
+                      reasoningEffort={session?.reasoningEffort ?? "medium"}
+                      supportedEfforts={supportedEfforts}
+                    />
+                  ) : null
+                }
+                isSubmitting={isStreaming}
+                modelPickerOpen={modelPickerOpen}
+                models={modelOptions}
+                onModelChange={setSelectedModelLabel}
+                onModelPickerOpenChange={setModelPickerOpen}
+                onSubmit={(payload) => void handleSubmit(payload)}
+                onValueChange={(v) => {
+                  setInputValue(v);
+                  skillsPicker.onInputChange(v);
                 }}
-                onDismiss={skillsPicker.dismiss}
-                anchorRef={inputWrapperRef}
+                onKeyDown={(e) => {
+                  // at-file-mention takes priority when its picker is open
+                  if (atFileMention.isOpen) {
+                    atFileMention.onKeyDown(e);
+                    if (e.defaultPrevented) return;
+                  }
+                  slashCommands.onKeyDown(e);
+                }}
+                value={inputValue}
+                placeholder={
+                  isConnecting
+                    ? "Connecting to Codex…"
+                    : isError
+                      ? "Reconnect to start chatting"
+                      : "Ask Codex to inspect, edit, or explain this project…"
+                }
+                selectedModel={selectedModelLabel}
               />
-            )}
-            <AI_Prompt
-              className="max-w-none py-0"
-              disabled={!isConnected || isStreaming}
-              isSubmitting={isStreaming}
-              models={modelOptions}
-              onModelChange={setSelectedModelLabel}
-              onSubmit={(payload) => void handleSubmit(payload)}
-              onValueChange={(v) => {
-                setInputValue(v);
-                skillsPicker.onInputChange(v);
-              }}
-              value={inputValue}
-              wrapperRef={inputWrapperRef}
-              placeholder={
-                isConnecting
-                  ? "Connecting to Codex…"
-                  : isError
-                    ? "Reconnect to start chatting"
-                    : "Ask Codex to inspect, edit, or explain this project…"
-              }
-              selectedModel={selectedModelLabel}
-            />
+            </div>
           </div>
         </div>
       </div>
@@ -836,9 +1058,16 @@ function SessionStatusDot({ status }: { status: string }) {
 type ChatBubbleProps = {
   message: ChatMessage;
   isLastAssistant?: boolean;
+  showAssistantLabel?: boolean;
 };
 
-function ChatBubble({ message, isLastAssistant }: ChatBubbleProps) {
+function ChatBubble({
+  message,
+  isLastAssistant,
+  showAssistantLabel = false,
+}: ChatBubbleProps) {
+  const showHeader = message.role !== "assistant" || showAssistantLabel;
+
   return (
     <div
       className={cn(
@@ -848,29 +1077,31 @@ function ChatBubble({ message, isLastAssistant }: ChatBubbleProps) {
     >
       <div
         className={cn(
-          "max-w-3xl rounded-4xl px-4 py-3 text-sm leading-6 shadow-sm",
+          "max-w-3xl px-4 py-3 text-sm leading-6",
           message.role === "user" &&
-            "bg-foreground text-background shadow-[0_16px_40px_-24px_rgba(255,255,255,0.55)]",
+            "rounded-4xl bg-foreground text-background shadow-[0_16px_40px_-24px_rgba(255,255,255,0.55)]",
           message.role === "assistant" &&
-            "border border-border/70 bg-background text-foreground",
+            "bg-transparent text-foreground",
           message.role === "system" &&
-            "border border-border/60 bg-muted/30 text-muted-foreground"
+            "rounded-3xl border border-border/60 bg-muted/20 text-muted-foreground"
         )}
       >
-        <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
-          {message.role === "assistant" ? (
-            <Bot className="size-3.5" />
-          ) : message.role === "user" ? null : (
-            <Sparkles className="size-3.5" />
-          )}
-          <span>
-            {message.role === "assistant"
-              ? "Codex"
-              : message.role === "user"
-                ? "You"
-                : "System"}
-          </span>
-        </div>
+        {showHeader && (
+          <div className="mb-2 flex items-center gap-2 text-[11px] uppercase tracking-[0.16em] text-muted-foreground">
+            {message.role === "assistant" ? (
+              <Bot className="size-3.5" />
+            ) : message.role === "user" ? null : (
+              <Sparkles className="size-3.5" />
+            )}
+            <span>
+              {message.role === "assistant"
+                ? "Codex"
+                : message.role === "user"
+                  ? "You"
+                  : "System"}
+            </span>
+          </div>
+        )}
 
         {message.role === "assistant" ? (
           <div
@@ -907,6 +1138,81 @@ function ChatBubble({ message, isLastAssistant }: ChatBubbleProps) {
   );
 }
 
+function TimelineRow({
+  entry,
+  messages,
+  items,
+  isStreaming,
+  showAssistantLabel,
+}: {
+  entry: TimelineEntry;
+  messages: ChatMessage[];
+  items: Record<string, TurnItem>;
+  isStreaming: boolean;
+  showAssistantLabel?: boolean;
+}) {
+  if (entry.kind === "message") {
+    const message = messages.find((m) => m.id === entry.id);
+    if (!message) return null;
+    const isLastAssistant =
+      message.role === "assistant" &&
+      messages.length > 0 &&
+      messages[messages.length - 1]?.id === message.id &&
+      isStreaming;
+    return (
+      <ChatBubble
+        message={message}
+        isLastAssistant={isLastAssistant}
+        showAssistantLabel={showAssistantLabel}
+      />
+    );
+  }
+
+  const item = items[entry.id];
+  if (!item) return null;
+  return <TurnItemDisplay item={item} />;
+}
+
+function ProcessingAccordion({ items }: { items: TurnItem[] }) {
+  return (
+    <Accordion className="rounded-xl border border-border/50 bg-muted/20 px-3" collapsible type="single">
+      <AccordionItem className="border-b-0" value="processing-items">
+        <AccordionTrigger className="py-2 hover:no-underline">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Loader2 className="size-3.5 animate-spin text-blue-400" />
+            <span className="font-medium text-foreground">Processing</span>
+            <span>({items.length})</span>
+          </div>
+        </AccordionTrigger>
+        <AccordionContent className="pt-1 pb-3">
+          <div className="space-y-2">
+            {items.map((item) => (
+              <TurnItemDisplay item={item} key={item.id} />
+            ))}
+          </div>
+        </AccordionContent>
+      </AccordionItem>
+    </Accordion>
+  );
+}
+
+function isProcessingTurnItem(item: TurnItem): boolean {
+  if (item.type === "commandExecution") {
+    return item.status === "inProgress";
+  }
+  if (item.type === "fileChange") {
+    return item.status === "inProgress";
+  }
+  if (item.type === "fuzzyFileSearch") {
+    return item.status === "inProgress";
+  }
+  if (item.type === "mcpToolCall") {
+    const normalizedStatus = item.status.toLowerCase();
+    return normalizedStatus === "inprogress" || normalizedStatus === "running" || normalizedStatus === "pending";
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Turn item display
 // ---------------------------------------------------------------------------
@@ -927,6 +1233,10 @@ function TurnItemDisplay({ item }: { item: TurnItem }) {
       return <WebSearchCard item={item} />;
     case "contextCompaction":
       return <ContextCompactionBanner item={item} />;
+    case "fuzzyFileSearch":
+      return <FuzzyFileSearchCard item={item} />;
+    case "turnDiff":
+      return <TurnDiffCard item={item} />;
     default:
       return null;
   }
@@ -1018,6 +1328,110 @@ function UnauthenticatedPrompt({ sessionId, onSetAuthState }: UnauthenticatedPro
         Login with ChatGPT
       </Button>
       {error && <p className="mt-2 text-xs text-red-400">{error}</p>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// InputFooterControls — inline composer controls (Requirements 17–19)
+// ---------------------------------------------------------------------------
+
+const EFFORT_LABELS: Record<ReasoningEffort, string> = {
+  none: "None",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Max",
+};
+
+type InputFooterControlsProps = {
+  collaborationMode: CollaborationModeKind;
+  approvalPolicy: ApprovalPolicyKind;
+  reasoningEffort: ReasoningEffort;
+  supportedEfforts: ReasoningEffort[];
+  onCollaborationModeChange: (mode: CollaborationModeKind) => void;
+  onApprovalPolicyChange: (policy: ApprovalPolicyKind) => void;
+  onReasoningEffortChange: (effort: ReasoningEffort) => void;
+  effortPickerOpen?: boolean;
+  onEffortPickerOpenChange?: (open: boolean) => void;
+};
+
+function InputFooterControls({
+  collaborationMode,
+  approvalPolicy,
+  reasoningEffort,
+  supportedEfforts,
+  onCollaborationModeChange,
+  onApprovalPolicyChange,
+  onReasoningEffortChange,
+  effortPickerOpen,
+  onEffortPickerOpenChange,
+}: InputFooterControlsProps) {
+  return (
+    <div className="flex items-center gap-2">
+      <Button
+        className="h-8 gap-1.5 px-2.5 text-xs"
+        onClick={() =>
+          onCollaborationModeChange(
+            collaborationMode === "plan" ? "default" : "plan"
+          )
+        }
+        type="button"
+        variant="ghost"
+      >
+        {collaborationMode === "plan" ? (
+          <Layers className="size-3" />
+        ) : (
+          <MessageSquare className="size-3" />
+        )}
+        {collaborationMode === "plan" ? "Plan" : "Chat"}
+      </Button>
+
+      <Button
+        className="h-8 gap-1.5 px-2.5 text-xs"
+        onClick={() =>
+          onApprovalPolicyChange(
+            approvalPolicy === "never" ? "untrusted" : "never"
+          )
+        }
+        type="button"
+        variant="ghost"
+      >
+        {approvalPolicy === "never" ? (
+          <ShieldOff className="size-3" />
+        ) : (
+          <Eye className="size-3" />
+        )}
+        {approvalPolicy === "never" ? "Full Access" : "Supervised"}
+      </Button>
+
+      {/* Effort picker (Requirements 19.2, 19.3, 19.4) */}
+      <DropdownMenu open={effortPickerOpen} onOpenChange={onEffortPickerOpenChange}>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1.5 px-2.5 text-xs"
+            type="button"
+          >
+            <Zap className="size-3" />
+            {EFFORT_LABELS[reasoningEffort] ?? reasoningEffort}
+            <ChevronDown className="size-3" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-36">
+          {supportedEfforts.map((effort) => (
+            <DropdownMenuItem
+              key={effort}
+              onSelect={() => onReasoningEffortChange(effort)}
+              className={cn(effort === reasoningEffort && "bg-muted font-medium")}
+            >
+              {EFFORT_LABELS[effort] ?? effort}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+
     </div>
   );
 }

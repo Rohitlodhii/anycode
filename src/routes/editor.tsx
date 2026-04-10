@@ -25,7 +25,8 @@ import htmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
 import jsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
 import "monaco-editor/min/vs/editor/editor.main.css";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 import { CodexChatPanel } from "@/components/codex/codex-chat-panel";
 import { useSessionStore } from "@/stores/session-store";
 import DragWindowRegion from "@/components/drag-window-region";
@@ -70,6 +71,7 @@ import {
 import type { FileNode } from "@/types/file-tree";
 import type { RecentProject } from "@/types/project-history";
 import { cn } from "@/utils/tailwind";
+import { FileConflictDialog } from "@/components/editor/file-conflict-dialog";
 
 type DialogMode = "rename" | "newFile" | "newFolder";
 
@@ -77,6 +79,11 @@ type DialogState = {
   mode: DialogMode;
   node: FileNode;
   value: string;
+};
+
+type ConfirmDeleteSessionState = {
+  sessionId: string;
+  sessionName: string;
 };
 
 type MonacoWorkerEnvironment = typeof self & {
@@ -161,9 +168,17 @@ function EditorPage() {
   const [isProjectsLoading, setIsProjectsLoading] = useState(false);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [confirmDeleteSession, setConfirmDeleteSession] =
+    useState<ConfirmDeleteSessionState | null>(null);
+
+  // State for file conflict dialog (external change vs unsaved local edits)
+  const [fileConflictPath, setFileConflictPath] = useState<string | null>(null);
 
   const activeView = useEditorUiStore((state) => state.activeView);
   const setActiveView = useEditorUiStore((state) => state.setActiveView);
+
+  // Ref to the Monaco editor instance for cursor navigation
+  const monacoEditorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
   const tabs = useEditorUiStore((state) => state.tabs);
   const activeTabPath = useEditorUiStore((state) => state.activeTabPath);
   const setActiveTabPath = useEditorUiStore((state) => state.setActiveTabPath);
@@ -180,12 +195,14 @@ function EditorPage() {
   const setSessionReady = useSessionStore((state) => state.setSessionReady);
   const setSessionError = useSessionStore((state) => state.setSessionError);
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
+  const hasHydrated = useSessionStore((state) => state.hasHydrated);
   const sessions = useSessionStore((state) => state.sessions);
   const setActiveSession = useSessionStore((state) => state.setActiveSession);
   const deleteSession = useSessionStore((state) => state.deleteSession);
   const renameSession = useSessionStore((state) => state.renameSession);
   const hasStreamingSession = useSessionStore((state) => state.hasStreamingSession);
   const getSessionsForProject = useSessionStore((state) => state.getSessionsForProject);
+  const archiveSessionsForProject = useSessionStore((state) => state.archiveSessionsForProject);
 
   // Derive the session ID to show for the current project
   const currentProjectSessionId = useMemo(() => {
@@ -203,6 +220,8 @@ function EditorPage() {
 
   // When the project changes, ensure a session exists and connect it
   useEffect(() => {
+    if (!hasHydrated || !resolvedFolderPath) return;
+
     if (!resolvedFolderPath) return;
 
     let cancelled = false;
@@ -246,7 +265,7 @@ function EditorPage() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resolvedFolderPath]);
+  }, [hasHydrated, resolvedFolderPath]);
 
   const activeTab = tabs.find((tab) => tab.path === activeTabPath) ?? null;
   const folderName = getBaseName(resolvedFolderPath) || "Workspace";
@@ -346,6 +365,65 @@ function EditorPage() {
     void loadRecentProjects();
   }, [resolvedFolderPath]);
 
+  // Subscribe to editor:openFile IPC events from the diff viewer / main process
+  useEffect(() => {
+    const unsubscribe = window.editor.onOpenFile(async ({ path, line }) => {
+      // Switch to editor view
+      setActiveView("editor");
+
+      // Build a minimal FileNode to reuse the existing openFile logic
+      const name = path.split("/").pop() ?? path.split("\\").pop() ?? path;
+      const relativePath = resolvedFolderPath
+        ? path.replace(resolvedFolderPath, "").replace(/^[/\\]/, "")
+        : name;
+
+      await openFile({
+        children: undefined,
+        name,
+        parentPath: resolvedFolderPath ?? undefined,
+        path,
+        relativePath,
+        type: "file",
+      });
+
+      // Navigate to the requested line after the editor has mounted/updated
+      if (line !== undefined && line > 0) {
+        // Use a short timeout to allow the editor to render the new file
+        window.setTimeout(() => {
+          const editor = monacoEditorRef.current;
+          if (!editor) return;
+          editor.revealLineInCenter(line);
+          editor.setPosition({ lineNumber: line, column: 1 });
+          editor.focus();
+        }, 100);
+      }
+    });
+
+    return unsubscribe;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resolvedFolderPath, setActiveView]);
+
+  // Subscribe to file:changed IPC events from the file watcher (main process)
+  useEffect(() => {
+    const unsubscribe = window.editor.onFileChanged(async ({ path }) => {
+      // Only react if this file is currently open in a tab
+      const openTab = useEditorUiStore.getState().tabs.find((t) => t.path === path);
+      if (!openTab) return;
+
+      // If the tab has unsaved changes, show the conflict dialog
+      if (openTab.isDirty) {
+        setFileConflictPath(path);
+        return;
+      }
+
+      // No unsaved changes — silently reload
+      await reloadFile(path);
+    });
+
+    return unsubscribe;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   async function loadTree(folderPath: string) {
     setIsTreeLoading(true);
     setTreeError(null);
@@ -413,7 +491,6 @@ function EditorPage() {
         relativePath: node.relativePath,
       };
 
-      console.log("Opened file:", node.path, "bytes:", content.length);
       openTab(nextTab);
     } catch (error) {
       console.error("Failed to open file", error);
@@ -430,6 +507,42 @@ function EditorPage() {
       markTabSaved(activeTab.path);
     } catch (error) {
       console.error("Failed to save file", error);
+    }
+  }
+
+  async function reloadFile(filePath: string) {
+    try {
+      const content = await window.api.readFile(filePath);
+
+      // Save cursor and scroll position before updating content
+      const editor = monacoEditorRef.current;
+      const position = editor?.getPosition();
+      const scrollTop = editor?.getScrollTop() ?? 0;
+
+      // Update the tab content and mark it as saved (matches disk)
+      const store = useEditorUiStore.getState();
+      const tab = store.tabs.find((t) => t.path === filePath);
+      if (!tab) return;
+
+      // Use openTab to replace the tab with fresh content
+      store.openTab({
+        ...tab,
+        content,
+        originalContent: content,
+        isDirty: false,
+      });
+
+      // Restore cursor and scroll after React re-renders
+      window.setTimeout(() => {
+        if (!editor) return;
+        const lineCount = editor.getModel()?.getLineCount() ?? 0;
+        if (position && position.lineNumber <= lineCount) {
+          editor.setPosition(position);
+          editor.setScrollTop(scrollTop);
+        }
+      }, 50);
+    } catch (error) {
+      console.error("Failed to reload file", error);
     }
   }
 
@@ -639,6 +752,19 @@ function EditorPage() {
     }
   }
 
+  async function handleRemoveRecentProject(project: RecentProject) {
+    try {
+      await window.api.removeRecentProject(project.path);
+      // Per requirement: removing a project from recents archives all its sessions.
+      archiveSessionsForProject(project.path);
+      await loadRecentProjects();
+      toast.success("Project removed from recents");
+    } catch (error) {
+      console.error("Failed to remove recent project", error);
+      toast.error("Failed to remove project from recents");
+    }
+  }
+
   const dialogTitle =
     dialogState?.mode === "rename"
       ? "Rename"
@@ -736,41 +862,67 @@ function EditorPage() {
 
                       return (
                         <div key={project.path}>
-                          <button
-                            className={cn(
-                              "flex w-full items-start gap-3 px-3 py-2 text-left transition-colors",
-                              isCurrentProject
-                                ? "bg-muted text-foreground"
-                                : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-                            )}
-                            onClick={() => void handleOpenRecentProject(project)}
-                            type="button"
-                          >
-                            <div className="relative mt-0.5 shrink-0">
-                              <FolderOpen className="size-4 text-muted-foreground" />
-                              {isStreaming && (
-                                <Loader2 className="absolute -right-1.5 -top-1.5 size-3 animate-spin text-blue-400" />
-                              )}
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-2">
-                                <span className="truncate text-sm font-medium text-foreground">
-                                  {project.name}
-                                </span>
-                                {isCurrentProject ? (
-                                  <span className="rounded-full border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                                    Current
-                                  </span>
-                                ) : null}
+                          <ContextMenu>
+                            <ContextMenuTrigger asChild>
+                              <div className="group relative">
+                                <button
+                                  className={cn(
+                                    "flex w-full items-start gap-3 px-3 py-2 text-left transition-colors",
+                                    isCurrentProject
+                                      ? "bg-muted text-foreground"
+                                      : "text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                                  )}
+                                  onClick={() => void handleOpenRecentProject(project)}
+                                  type="button"
+                                >
+                                  <div className="relative mt-0.5 shrink-0">
+                                    <FolderOpen className="size-4 text-muted-foreground" />
+                                    {isStreaming && (
+                                      <Loader2 className="absolute -right-1.5 -top-1.5 size-3 animate-spin text-blue-400" />
+                                    )}
+                                  </div>
+                                  <div className="min-w-0 flex-1 pr-8">
+                                    <div className="flex items-center gap-2">
+                                      <span className="truncate text-sm font-medium text-foreground">
+                                        {project.name}
+                                      </span>
+                                      {isCurrentProject ? (
+                                        <span className="rounded-full border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+                                          Current
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                    <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+                                      {project.path}
+                                    </p>
+                                    <p className="mt-1 text-[11px] text-muted-foreground/80">
+                                      {formatLastOpened(project.lastOpenedAt)}
+                                    </p>
+                                  </div>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  title="Remove from recents"
+                                  className="absolute right-2 top-2 rounded p-1 text-muted-foreground/70 opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void handleRemoveRecentProject(project);
+                                  }}
+                                >
+                                  <Trash2 className="size-3.5" />
+                                </button>
                               </div>
-                              <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
-                                {project.path}
-                              </p>
-                              <p className="mt-1 text-[11px] text-muted-foreground/80">
-                                {formatLastOpened(project.lastOpenedAt)}
-                              </p>
-                            </div>
-                          </button>
+                            </ContextMenuTrigger>
+                            <ContextMenuContent className="w-48">
+                              <ContextMenuItem
+                                onSelect={() => void handleRemoveRecentProject(project)}
+                              >
+                                <Trash2 className="size-3.5" />
+                                Remove from Recents
+                              </ContextMenuItem>
+                            </ContextMenuContent>
+                          </ContextMenu>
 
                           {/* Sessions list under the active project */}
                           {isCurrentProject && projectSessions.length > 0 && (
@@ -875,7 +1027,10 @@ function EditorPage() {
                                           className="rounded p-0.5 hover:bg-red-500/20 hover:text-red-400"
                                           onClick={(e) => {
                                             e.stopPropagation();
-                                            deleteSession(sess.id);
+                                            setConfirmDeleteSession({
+                                              sessionId: sess.id,
+                                              sessionName: sess.name,
+                                            });
                                           }}
                                         >
                                           <Trash2 className="size-3" />
@@ -1093,6 +1248,9 @@ function EditorPage() {
                       </div>
                     }
                     onChange={handleEditorChange}
+                    onMount={(editor) => {
+                      monacoEditorRef.current = editor;
+                    }}
                     options={{
                       automaticLayout: true,
                       bracketPairColorization: { enabled: true },
@@ -1198,6 +1356,69 @@ function EditorPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Confirm: delete session */}
+      <Dialog
+        open={Boolean(confirmDeleteSession)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setConfirmDeleteSession(null);
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Delete session?</DialogTitle>
+          </DialogHeader>
+          <div className="text-sm text-muted-foreground">
+            This will remove{" "}
+            <span className="font-medium text-foreground">
+              {confirmDeleteSession?.sessionName ?? "this session"}
+            </span>
+            . This can’t be undone.
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setConfirmDeleteSession(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => {
+                if (!confirmDeleteSession) return;
+                deleteSession(confirmDeleteSession.sessionId);
+                setConfirmDeleteSession(null);
+              }}
+            >
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* File conflict dialog — shown when an externally-changed file has unsaved local edits */}
+      <FileConflictDialog
+        open={Boolean(fileConflictPath)}
+        filePath={fileConflictPath ?? ""}
+        onKeepLocal={() => setFileConflictPath(null)}
+        onReloadFromDisk={async () => {
+          if (fileConflictPath) {
+            await reloadFile(fileConflictPath);
+          }
+          setFileConflictPath(null);
+        }}
+        onShowDiff={() => {
+          // Switch to editor view so the user can see their local changes
+          // alongside the external change notification
+          setActiveView("editor");
+          setFileConflictPath(null);
+        }}
+        onClose={() => setFileConflictPath(null)}
+      />
 
       <CommandDialog
         description="Search files by name or path."
@@ -1332,7 +1553,7 @@ function TreeNode({
           </ContextMenuItem>
           <ContextMenuItem
             onSelect={() => {
-              console.log("Copy placeholder:", node.path);
+              // TODO: implement copy
             }}
           >
             <Copy className="size-3.5" />
@@ -1340,7 +1561,7 @@ function TreeNode({
           </ContextMenuItem>
           <ContextMenuItem
             onSelect={() => {
-              console.log("Cut placeholder:", node.path);
+              // TODO: implement cut
             }}
           >
             <Scissors className="size-3.5" />

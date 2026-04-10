@@ -3,6 +3,7 @@ import { RPCLink } from "@orpc/client/message-port";
 import type { RouterClient } from "@orpc/server";
 import { IPC_CHANNELS } from "@/constants";
 import type { router } from "./router";
+import { logger } from "@/utils/logger";
 
 type RPCClient = RouterClient<typeof router>;
 
@@ -33,12 +34,12 @@ class IPCManager {
       return;
     }
 
-    console.log("[Debug][ORPC][Renderer] initialize:start");
+    logger.debug("[ORPC][Renderer] initialize:start");
     this.clientPort.start();
-    console.log("[Debug][ORPC][Renderer] clientPort started");
+    logger.debug("[ORPC][Renderer] clientPort started");
 
     window.postMessage(IPC_CHANNELS.START_ORPC_SERVER, "*", [this.serverPort]);
-    console.log("[Debug][ORPC][Renderer] start message posted");
+    logger.debug("[ORPC][Renderer] start message posted");
     this.initialized = true;
   }
 }

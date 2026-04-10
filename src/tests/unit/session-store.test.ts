@@ -5,7 +5,10 @@
 import * as fc from "fast-check";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  ALL_REASONING_EFFORTS,
+  applyModelChangeEffort,
   type ChatMessage,
+  filterReasoningEfforts,
   type PlanStep,
   type Session,
   type TurnItem,
@@ -38,6 +41,9 @@ function seedSession(partial: Partial<Session> & { id: string; projectPath: stri
     authState: null,
     createdAt: Date.now(),
     isArchived: false,
+    collaborationMode: "default",
+    approvalPolicy: "untrusted",
+    reasoningEffort: "medium",
     ...partial,
   };
   useSessionStore.setState((state) => ({
@@ -515,6 +521,191 @@ describe("Property 11: Error classification preserves codexErrorInfo type", () =
           const session = useSessionStore.getState().sessions[sessionId];
           expect(session?.status).toBe("error");
           expect(session?.errorMessage).toContain(errorType);
+        }
+      ),
+      { numRuns: 100 }
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Property 12: Session settings round-trip
+// Feature: codex-session-manager, Property 12: Session settings round-trip
+// ---------------------------------------------------------------------------
+
+describe("Property 12: Session settings round-trip", () => {
+  beforeEach(resetStore);
+
+  const arbCollaborationMode = fc.constantFrom("plan", "default") as fc.Arbitrary<
+    import("@/stores/session-store").CollaborationModeKind
+  >;
+  const arbApprovalPolicy = fc.constantFrom("untrusted", "never") as fc.Arbitrary<
+    import("@/stores/session-store").ApprovalPolicyKind
+  >;
+  const arbReasoningEffort = fc.constantFrom(
+    "none",
+    "low",
+    "medium",
+    "high",
+    "xhigh"
+  ) as fc.Arbitrary<import("@/stores/session-store").ReasoningEffort>;
+
+  it("setCollaborationMode is immediately reflected in the store", () => {
+    fc.assert(
+      fc.property(arbSessionId, arbCollaborationMode, (id, mode) => {
+        resetStore();
+        seedSession({ id, projectPath: "/proj" });
+
+        useSessionStore.getState().setCollaborationMode(id, mode);
+
+        expect(useSessionStore.getState().sessions[id]?.collaborationMode).toBe(mode);
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it("setApprovalPolicy is immediately reflected in the store", () => {
+    fc.assert(
+      fc.property(arbSessionId, arbApprovalPolicy, (id, policy) => {
+        resetStore();
+        seedSession({ id, projectPath: "/proj" });
+
+        useSessionStore.getState().setApprovalPolicy(id, policy);
+
+        expect(useSessionStore.getState().sessions[id]?.approvalPolicy).toBe(policy);
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it("setReasoningEffort is immediately reflected in the store", () => {
+    fc.assert(
+      fc.property(arbSessionId, arbReasoningEffort, (id, effort) => {
+        resetStore();
+        seedSession({ id, projectPath: "/proj" });
+
+        useSessionStore.getState().setReasoningEffort(id, effort);
+
+        expect(useSessionStore.getState().sessions[id]?.reasoningEffort).toBe(effort);
+      }),
+      { numRuns: 100 }
+    );
+  });
+
+  it("all three settings can be set independently without interfering with each other", () => {
+    fc.assert(
+      fc.property(
+        arbSessionId,
+        arbCollaborationMode,
+        arbApprovalPolicy,
+        arbReasoningEffort,
+        (id, mode, policy, effort) => {
+          resetStore();
+          seedSession({ id, projectPath: "/proj" });
+
+          useSessionStore.getState().setCollaborationMode(id, mode);
+          useSessionStore.getState().setApprovalPolicy(id, policy);
+          useSessionStore.getState().setReasoningEffort(id, effort);
+
+          const session = useSessionStore.getState().sessions[id];
+          expect(session?.collaborationMode).toBe(mode);
+          expect(session?.approvalPolicy).toBe(policy);
+          expect(session?.reasoningEffort).toBe(effort);
+        }
+      ),
+      { numRuns: 100 }
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Property 13: Reasoning effort filter respects model support
+// Feature: codex-session-manager, Property 13: Reasoning effort filter respects model support
+// ---------------------------------------------------------------------------
+
+describe("Property 13: Reasoning effort filter respects model support", () => {
+  it("includes an effort iff it appears in model.supportedReasoningEfforts", () => {
+    fc.assert(
+      fc.property(
+        // Generate a random subset of all efforts as the model's supported list
+        fc.subarray(ALL_REASONING_EFFORTS, { minLength: 0, maxLength: ALL_REASONING_EFFORTS.length }),
+        (supportedEfforts) => {
+          const model = {
+            supportedReasoningEfforts: supportedEfforts.map((e) => ({ reasoningEffort: e, description: "" })),
+            defaultReasoningEffort: supportedEfforts[0] ?? ("medium" as import("@/stores/session-store").ReasoningEffort),
+          };
+
+          const filtered = filterReasoningEfforts(model);
+          const supportedSet = new Set(supportedEfforts);
+
+          // Every effort in filtered must be in the supported set
+          for (const effort of filtered) {
+            expect(supportedSet.has(effort)).toBe(true);
+          }
+
+          // Every effort in the supported set must appear in filtered
+          for (const effort of supportedEfforts) {
+            expect(filtered).toContain(effort);
+          }
+        }
+      ),
+      { numRuns: 100 }
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Property 14: Reasoning effort resets to model default when unsupported
+// Feature: codex-session-manager, Property 14: Reasoning effort resets to model default when unsupported
+// ---------------------------------------------------------------------------
+
+describe("Property 14: Reasoning effort resets to model default when unsupported", () => {
+  it("applyModelChangeEffort returns model.defaultReasoningEffort when current effort is unsupported", () => {
+    fc.assert(
+      fc.property(
+        // Generate a random non-empty subset of efforts as supported
+        fc.subarray(ALL_REASONING_EFFORTS, { minLength: 1, maxLength: ALL_REASONING_EFFORTS.length }),
+        // Pick a default effort from the supported list
+        fc.integer({ min: 0, max: ALL_REASONING_EFFORTS.length - 1 }),
+        (supportedEfforts, defaultIdx) => {
+          const defaultReasoningEffort = supportedEfforts[defaultIdx % supportedEfforts.length];
+          const model = {
+            supportedReasoningEfforts: supportedEfforts.map((e) => ({ reasoningEffort: e, description: "" })),
+            defaultReasoningEffort,
+          };
+
+          const supportedSet = new Set(supportedEfforts);
+          const unsupportedEfforts = ALL_REASONING_EFFORTS.filter((e) => !supportedSet.has(e));
+
+          // Only run the assertion when there are unsupported efforts to test
+          fc.pre(unsupportedEfforts.length > 0);
+
+          for (const unsupportedEffort of unsupportedEfforts) {
+            const result = applyModelChangeEffort(model, unsupportedEffort);
+            expect(result).toBe(defaultReasoningEffort);
+          }
+        }
+      ),
+      { numRuns: 100 }
+    );
+  });
+
+  it("applyModelChangeEffort keeps the current effort when it is supported by the new model", () => {
+    fc.assert(
+      fc.property(
+        fc.subarray(ALL_REASONING_EFFORTS, { minLength: 1, maxLength: ALL_REASONING_EFFORTS.length }),
+        fc.integer({ min: 0, max: ALL_REASONING_EFFORTS.length - 1 }),
+        (supportedEfforts, defaultIdx) => {
+          const defaultReasoningEffort = supportedEfforts[defaultIdx % supportedEfforts.length];
+          const model = {
+            supportedReasoningEfforts: supportedEfforts.map((e) => ({ reasoningEffort: e, description: "" })),
+            defaultReasoningEffort,
+          };
+
+          for (const supportedEffort of supportedEfforts) {
+            const result = applyModelChangeEffort(model, supportedEffort);
+            expect(result).toBe(supportedEffort);
+          }
         }
       ),
       { numRuns: 100 }

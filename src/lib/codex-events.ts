@@ -11,15 +11,18 @@ import {
   type CommandItem,
   type ContextCompactionItem,
   type FileChangeItem,
+  type FuzzyFileSearchItem,
   type McpToolCallItem,
   type PlanItem,
   type PlanStep,
   type ReasoningItem,
   type TurnItem,
+  type TurnDiffItem,
   type WebSearchItem,
   useSessionStore,
 } from "@/stores/session-store";
 import type { CodexEventPayload, CodexRequestPayload } from "@/types/codex-bridge";
+import { logCodexEvent } from "@/lib/logger";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -52,6 +55,11 @@ function handleTurnCompleted(sessionId: string, params: Record<string, unknown>)
   const status =
     (params.status as string | undefined) ??
     ((params.turn as { status?: string } | undefined)?.status as string | undefined);
+
+  // "interrupted" is a normal outcome when the user hits Stop.
+  if (status === "interrupted") {
+    return;
+  }
 
   if (status === "failed") {
     const errorInfo =
@@ -207,7 +215,7 @@ function handleAgentMessageDelta(sessionId: string, params: Record<string, unkno
     (params.id as string | undefined);
   const delta = params.delta as string | undefined;
   if (messageId && delta !== undefined) {
-    upsertAssistantMessage(sessionId, messageId, delta, "append");
+    upsertAssistantMessage(sessionId, messageId, delta, "append", null);
   }
 }
 
@@ -352,6 +360,8 @@ export function routeEvent(payload: CodexEventPayload): void {
   const sessionId = payload.agentId;
   const params = (payload.params ?? {}) as Record<string, unknown>;
 
+  logCodexEvent(payload.method, { sessionId, params });
+
   switch (payload.method) {
     // Turn lifecycle
     case "turn/started":
@@ -390,6 +400,68 @@ export function routeEvent(payload: CodexEventPayload): void {
       handlePlanUpdated(sessionId, params);
       break;
 
+    // Turn diff
+    case "turn/diff/updated": {
+      const store = getStore();
+      const diff = (params.diff as string | undefined) ?? "";
+      const threadId = (params.threadId as string | undefined) ?? "";
+      const turnId = (params.turnId as string | undefined) ?? "";
+      if (turnId) {
+        store.upsertItem(sessionId, {
+          id: `turnDiff:${turnId}`,
+          type: "turnDiff",
+          diff,
+          threadId,
+          turnId,
+        });
+      }
+      break;
+    }
+
+    // Fuzzy file search
+    case "fuzzyFileSearch/sessionUpdated": {
+      const store = getStore();
+      const searchSessionId = (params.sessionId as string | undefined) ?? "";
+      const query = (params.query as string | undefined) ?? "";
+      const filesRaw = (params.files as Array<Record<string, unknown>> | undefined) ?? [];
+      if (!searchSessionId) break;
+      store.upsertItem(sessionId, {
+        id: `fuzzyFileSearch:${searchSessionId}`,
+        type: "fuzzyFileSearch",
+        sessionId: searchSessionId,
+        query,
+        status: "inProgress",
+        files: filesRaw.map((f) => ({
+          fileName: (f.file_name as string) ?? (f.fileName as string) ?? "",
+          path: (f.path as string) ?? "",
+          root: (f.root as string) ?? "",
+          score: (f.score as number) ?? 0,
+          indices: (f.indices as number[] | null | undefined) ?? null,
+        })),
+      });
+      break;
+    }
+
+    case "fuzzyFileSearch/sessionCompleted": {
+      const store = getStore();
+      const searchSessionId = (params.sessionId as string | undefined) ?? "";
+      if (!searchSessionId) break;
+      const existing = store.sessions[sessionId]?.items?.[`fuzzyFileSearch:${searchSessionId}`] as
+        | { type?: string; query?: string; files?: unknown }
+        | undefined;
+      store.upsertItem(sessionId, {
+        id: `fuzzyFileSearch:${searchSessionId}`,
+        type: "fuzzyFileSearch",
+        sessionId: searchSessionId,
+        query: typeof existing?.query === "string" ? existing.query : "",
+        status: "completed",
+        files: Array.isArray((existing as { files?: unknown })?.files)
+          ? ((existing as { files: unknown[] }).files as any)
+          : [],
+      });
+      break;
+    }
+
     // Thread
     case "thread/status/changed":
       handleThreadStatusChanged(sessionId, params);
@@ -417,19 +489,23 @@ export function routeEvent(payload: CodexEventPayload): void {
 }
 
 function handleAgentMessageItem(sessionId: string, params: Record<string, unknown>) {
-  const item = (params.item as { type?: string; id?: string; text?: string } | undefined) ?? params;
+  const item =
+    (params.item as
+      | { type?: string; id?: string; text?: string; phase?: "commentary" | "final_answer" | null }
+      | undefined) ?? params;
   if (item.type !== "agentMessage" || !item.id) {
     return;
   }
 
-  upsertAssistantMessage(sessionId, item.id, item.text ?? "", "replace");
+  upsertAssistantMessage(sessionId, item.id, item.text ?? "", "replace", item.phase ?? null);
 }
 
 function upsertAssistantMessage(
   sessionId: string,
   messageId: string,
   content: string,
-  mode: "append" | "replace"
+  mode: "append" | "replace",
+  phase: "commentary" | "final_answer" | null
 ) {
   const store = getStore();
   const session = store.sessions[sessionId];
@@ -444,6 +520,7 @@ function upsertAssistantMessage(
       role: "assistant",
       content,
       createdAt: Date.now(),
+      phase,
     });
     return;
   }
@@ -463,6 +540,7 @@ function upsertAssistantMessage(
             msg.id === messageId
               ? {
                   ...msg,
+                  phase: phase ?? msg.phase ?? null,
                   content: mode === "append" ? msg.content + content : content,
                 }
               : msg
@@ -491,6 +569,9 @@ function normalizeFileChangeKind(kind: unknown): string {
 export function routeRequest(payload: CodexRequestPayload): void {
   const sessionId = payload.agentId;
   const store = getStore();
+  
+  logCodexEvent(`request:${payload.method}`, { sessionId });
+  
   store.setPendingRequest(sessionId, payload);
 }
 

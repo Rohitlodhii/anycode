@@ -1,7 +1,9 @@
 import { type ReactNode, useEffect, useState } from "react";
 import { getPlatform } from "@/actions/app";
 import { closeWindow, maximizeWindow, minimizeWindow } from "@/actions/window";
+import ToggleTheme from "@/components/toggle-theme";
 import { cn } from "@/utils/tailwind";
+import { logger } from "@/utils/logger";
 
 interface DragWindowRegionProps {
   title?: ReactNode;
@@ -24,7 +26,7 @@ export default function DragWindowRegion({
 
   useEffect(() => {
     let active = true;
-    console.log("[Debug][Platform] detect:start");
+    logger.debug("[Platform] detect:start");
 
     getPlatform()
       .then((value) => {
@@ -32,12 +34,11 @@ export default function DragWindowRegion({
           return;
         }
 
-        console.log("[Debug][Platform] detect:success", value);
+        logger.debug("[Platform] detect:success", value);
         setPlatform(value);
       })
       .catch((error) => {
-        console.error("[Debug][Platform] detect:error", error);
-        console.error("Failed to detect platform", error);
+        logger.error("[Platform] detect:error", error);
       });
 
     return () => {
@@ -79,7 +80,8 @@ export default function DragWindowRegion({
 
 function WindowButtons() {
   return (
-    <div className="no-drag flex">
+    <div className="no-drag flex items-center">
+      <ToggleTheme />
       <button
         className="flex size-8 items-center justify-center text-muted-foreground hover:bg-muted hover:text-foreground"
         onClick={minimizeWindow}

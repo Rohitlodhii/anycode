@@ -94,6 +94,21 @@ async function readDirectoryRecursive(
   return nodes;
 }
 
+/**
+ * Flattens a FileNode tree into a flat array of relative paths for files only.
+ * Excludes folder nodes and the root node itself.
+ */
+export function flattenFileTree(node: FileNode): string[] {
+  const result: string[] = [];
+  if (node.type === "file" && node.relativePath) {
+    result.push(node.relativePath);
+  }
+  for (const child of node.children ?? []) {
+    result.push(...flattenFileTree(child));
+  }
+  return result;
+}
+
 export function buildFileTreeSync(rootPath: string): FileNode {
   const rootName = path.basename(rootPath);
   const children = readDirectoryRecursiveSync(rootPath, rootPath, 0);

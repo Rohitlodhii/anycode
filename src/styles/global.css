@@ -162,6 +162,184 @@
   --radius-4xl: calc(var(--radius) + 16px);
 }
 
+/* ── react-diff-view theming ─────────────────────────────────────────────── */
+.diff-themed .diff-unified,
+.diff-themed .diff-split {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* Gutter (line numbers) */
+.diff-themed .diff-gutter {
+  padding: 0 8px;
+  min-width: 40px;
+  text-align: right;
+  color: oklch(0.556 0 0 / 60%);
+  user-select: none;
+  background: transparent;
+  border-right: 1px solid oklch(1 0 0 / 8%);
+}
+
+/* Code cells */
+.diff-themed .diff-code {
+  padding: 0 12px;
+  white-space: pre;
+}
+
+/* Added lines — full-width green */
+.diff-themed .diff-line-insert .diff-gutter,
+.diff-themed .diff-line-insert .diff-code {
+  background-color: oklch(0.45 0.15 145 / 20%);
+}
+.diff-themed .diff-line-insert .diff-code {
+  color: oklch(0.82 0.12 145);
+}
+.diff-themed .diff-line-insert .diff-gutter {
+  background-color: oklch(0.45 0.15 145 / 12%);
+  color: oklch(0.65 0.12 145 / 80%);
+}
+
+/* Deleted lines — full-width red */
+.diff-themed .diff-line-delete .diff-gutter,
+.diff-themed .diff-line-delete .diff-code {
+  background-color: oklch(0.45 0.2 25 / 20%);
+}
+.diff-themed .diff-line-delete .diff-code {
+  color: oklch(0.82 0.12 25);
+  text-decoration: none;
+}
+.diff-themed .diff-line-delete .diff-gutter {
+  background-color: oklch(0.45 0.2 25 / 12%);
+  color: oklch(0.65 0.12 25 / 80%);
+}
+
+/* Hunk header */
+.diff-themed .diff-hunk-header {
+  background-color: oklch(0.3 0.05 250 / 30%);
+  color: oklch(0.6 0.05 250);
+  font-size: 11px;
+  padding: 2px 12px;
+}
+
+/* Normal (context) lines */
+.diff-themed .diff-line-normal .diff-code {
+  color: oklch(0.75 0 0);
+}
+
+/* Inline word-level highlights */
+.diff-themed .diff-code-insert-word {
+  background-color: oklch(0.45 0.18 145 / 45%);
+  border-radius: 2px;
+}
+.diff-themed .diff-code-delete-word {
+  background-color: oklch(0.45 0.22 25 / 45%);
+  border-radius: 2px;
+}
+
+/* ── markdown-renderer prose styles ─────────────────────────────────────── */
+.prose-chat {
+  font-size: 0.875rem;
+  line-height: 1.7;
+  color: inherit;
+}
+.prose-chat p {
+  margin: 0.5em 0;
+}
+.prose-chat p:first-child { margin-top: 0; }
+.prose-chat p:last-child  { margin-bottom: 0; }
+
+.prose-chat strong { font-weight: 600; color: oklch(0.95 0 0); }
+.prose-chat em     { font-style: italic; color: oklch(0.85 0 0); }
+
+.prose-chat a {
+  color: oklch(0.7 0.15 250);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.prose-chat a:hover { color: oklch(0.85 0.15 250); }
+
+.prose-chat ul,
+.prose-chat ol {
+  margin: 0.5em 0;
+  padding-left: 1.5em;
+}
+.prose-chat ul { list-style-type: disc; }
+.prose-chat ol { list-style-type: decimal; }
+.prose-chat li { margin: 0.2em 0; }
+.prose-chat li > ul,
+.prose-chat li > ol { margin: 0.2em 0; }
+
+.prose-chat h1, .prose-chat h2, .prose-chat h3,
+.prose-chat h4, .prose-chat h5, .prose-chat h6 {
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 1em 0 0.4em;
+  color: oklch(0.95 0 0);
+  letter-spacing: -0.01em;
+}
+.prose-chat h1 { font-size: 1.2em; }
+.prose-chat h2 { font-size: 1.1em; }
+.prose-chat h3 { font-size: 1em; }
+.prose-chat h4, .prose-chat h5, .prose-chat h6 { font-size: 0.9em; }
+
+.prose-chat code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: oklch(1 0 0 / 8%);
+  border: 1px solid oklch(1 0 0 / 12%);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  color: oklch(0.88 0.06 250);
+}
+
+.prose-chat pre {
+  margin: 0.75em 0;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid oklch(1 0 0 / 10%);
+}
+.prose-chat pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font-size: 0.82em;
+}
+
+.prose-chat blockquote {
+  border-left: 3px solid oklch(1 0 0 / 20%);
+  padding-left: 1em;
+  margin: 0.5em 0;
+  color: oklch(0.7 0 0);
+  font-style: italic;
+}
+
+.prose-chat hr {
+  border: none;
+  border-top: 1px solid oklch(1 0 0 / 12%);
+  margin: 1em 0;
+}
+
+.prose-chat table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85em;
+  margin: 0.75em 0;
+}
+.prose-chat th,
+.prose-chat td {
+  border: 1px solid oklch(1 0 0 / 12%);
+  padding: 0.4em 0.75em;
+  text-align: left;
+}
+.prose-chat th {
+  background: oklch(1 0 0 / 6%);
+  font-weight: 600;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

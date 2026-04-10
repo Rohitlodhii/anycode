@@ -211,3 +211,61 @@ This feature overhauls how the application connects to and manages Codex CLI age
 2. WHEN `account/updated` is received, THE Chat_Panel SHALL update the auth status display immediately.
 3. WHEN the user is unauthenticated, THE Chat_Panel SHALL display a login prompt with options for API key or ChatGPT browser login.
 4. WHEN `account/login/start` with `type: "chatgpt"` returns an `authUrl`, THE Chat_Panel SHALL open the URL in the system browser.
+
+### Requirement 17: Collaboration Mode Switching (Plan / Chat)
+
+**User Story:** As a user, I want to switch between plan mode and default chat mode so that I can control whether Codex produces a step-by-step plan before executing.
+
+#### Acceptance Criteria
+
+1. THE Session_Store SHALL track a `collaborationMode` field per session, with possible values `"plan"` and `"default"`.
+2. WHEN a user switches to plan mode, THE Chat_Panel SHALL pass `collaborationMode: { mode: "plan", settings: { ... } }` in the next `turn/start` call.
+3. WHEN a user switches to default (chat) mode, THE Chat_Panel SHALL pass `collaborationMode: { mode: "default", settings: { ... } }` in the next `turn/start` call.
+4. THE Chat_Panel SHALL display the current collaboration mode visibly in the input bar area so the user always knows which mode is active.
+5. WHEN the collaboration mode changes, THE Session_Store SHALL persist the new mode so it is applied to all subsequent turns in that session.
+
+### Requirement 18: Access Level Selection (Supervised / Full Access)
+
+**User Story:** As a user, I want to choose between supervised and full-access modes so that I can control how much autonomy Codex has when executing commands and making file changes.
+
+#### Acceptance Criteria
+
+1. THE Session_Store SHALL track an `approvalPolicy` field per session, representing the `AskForApproval` value (`"untrusted"` for supervised, `"never"` for full access).
+2. WHEN a user selects supervised access, THE Chat_Panel SHALL set `approvalPolicy: "untrusted"` on the next `turn/start` call, requiring approval for all untrusted operations.
+3. WHEN a user selects full access, THE Chat_Panel SHALL set `approvalPolicy: "never"` on the next `turn/start` call, allowing Codex to execute without prompting.
+4. THE Chat_Panel SHALL display the current access level visibly in the input bar area so the user always knows which level is active.
+5. WHEN the access level changes, THE Session_Store SHALL persist the new policy so it is applied to all subsequent turns in that session.
+
+### Requirement 19: Reasoning Effort Selection
+
+**User Story:** As a user, I want to select the reasoning effort level (e.g., low, medium, high) so that I can trade off response speed against depth of reasoning.
+
+#### Acceptance Criteria
+
+1. THE Session_Store SHALL track a `reasoningEffort` field per session with values from `ReasoningEffort`: `"none"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`.
+2. WHEN a user selects a reasoning effort level, THE Chat_Panel SHALL pass `effort: <selected>` in the next `turn/start` call.
+3. THE Chat_Panel SHALL only display reasoning effort options that are supported by the currently selected model, based on `model.supportedReasoningEfforts`.
+4. THE Chat_Panel SHALL display the current reasoning effort level visibly in the input bar area.
+5. WHEN the selected model changes and the current reasoning effort is not supported, THE Chat_Panel SHALL reset the reasoning effort to the model's `defaultReasoningEffort`.
+
+### Requirement 20: Slash Command System
+
+**User Story:** As a user, I want to type slash commands (e.g., `/model`, `/plan`, `/default`, `/mcp`) in the chat input so that I can quickly change session settings without leaving the keyboard.
+
+#### Acceptance Criteria
+
+1. WHEN a user types `/` as the first character in the input bar, THE Chat_Panel SHALL display a slash command suggestion card above the input bar listing all available commands.
+2. WHEN a user continues typing after `/`, THE Chat_Panel SHALL filter the suggestion list to commands whose name or description matches the typed text.
+3. THE Slash_Command_System SHALL support at minimum the following commands:
+   - `/model` — open the model picker to switch the response model for this thread
+   - `/plan` — switch this thread into plan mode (`collaborationMode.mode = "plan"`)
+   - `/default` — switch this thread back to normal chat mode (`collaborationMode.mode = "default"`)
+   - `/mcp` — open the MCP server status panel
+   - `/effort` — open the reasoning effort picker
+   - `/supervised` — set access level to supervised (`approvalPolicy: "untrusted"`)
+   - `/full-access` — set access level to full access (`approvalPolicy: "never"`)
+4. WHEN a user selects a command from the suggestion card (via click or keyboard navigation), THE Chat_Panel SHALL execute that command immediately and clear the input bar.
+5. THE slash command suggestion card SHALL appear above the input bar (not below), so it does not obscure the chat history.
+6. WHEN the input bar is empty or the first character is not `/`, THE Slash_Command_System SHALL hide the suggestion card.
+7. WHEN a slash command opens a sub-picker (e.g., `/model` opens a model list, `/effort` opens an effort list), THE Chat_Panel SHALL display that sub-picker above the input bar as well.
+8. IF a user presses Escape while the suggestion card is open, THEN THE Slash_Command_System SHALL dismiss the card and restore focus to the input bar.

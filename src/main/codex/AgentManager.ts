@@ -1,5 +1,6 @@
 import type { ServerNotification, ServerRequest, v2 } from "@/codex-schema";
 import type { CodexAgentSession, CodexModelOption } from "@/types/codex-bridge";
+import { logger } from "@/utils/logger";
 import {
   CodexAgent,
   type CodexAgentSnapshot,
@@ -25,7 +26,7 @@ export class AgentManager {
   ) => Promise<CodexServerRequestResult>;
 
   async ensure(agentId: string, options: EnsureAgentOptions): Promise<CodexAgentSession> {
-    console.log("[CodexDebug][Manager] ensure:start", { agentId, options });
+    logger.debug("[Codex][Manager] ensure:start", { agentId });
     const existing = this.agents.get(agentId);
     if (existing) {
       const snapshot = existing.getSnapshot();
@@ -39,7 +40,7 @@ export class AgentManager {
         };
       }
 
-      console.log("[CodexDebug][Manager] ensure:recreate", { agentId });
+      logger.debug("[Codex][Manager] ensure:recreate", { agentId });
       this.kill(agentId);
     }
 
@@ -62,7 +63,7 @@ export class AgentManager {
 
     const thread = await agent.start(options);
     const models = mapModels(await agent.listModels());
-    console.log("[CodexDebug][Manager] ensure:ready", {
+    logger.debug("[Codex][Manager] ensure:ready", {
       agentId,
       modelCount: models.length,
       threadId: thread.thread.id,
@@ -85,7 +86,7 @@ export class AgentManager {
   }
 
   kill(agentId: string) {
-    console.log("[CodexDebug][Manager] kill", { agentId });
+    logger.debug("[Codex][Manager] kill", { agentId });
     const agent = this.agents.get(agentId);
     if (!agent) {
       return;
@@ -106,19 +107,46 @@ export class AgentManager {
     return Array.from(this.agents.keys());
   }
 
-  async send(agentId: string, text: string, options?: { model?: string | null }) {
-    console.log("[CodexDebug][Manager] send", { agentId, model: options?.model, text });
+  async send(agentId: string, text: string, options?: { model?: string | null; collaborationMode?: string | null; approvalPolicy?: string | null; effort?: string | null; attachments?: string[] }) {
+    logger.debug("[Codex][Manager] send", { agentId });
     const agent = this.agents.get(agentId);
     if (!agent) {
       throw new Error(`No Codex agent found for ${agentId}`);
     }
 
-    return agent.send(text, options);
+    const resolvedModel = resolveModel(this.models.get(agentId) ?? [], options?.model);
+    if (!resolvedModel) {
+      throw new Error(`No model available for ${agentId}`);
+    }
+
+    return agent.send(text, {
+      ...options,
+      model: resolvedModel,
+    });
   }
 }
 
 function getDefaultModel(models: CodexModelOption[]) {
   return models.find((model) => model.isDefault)?.id ?? models[0]?.id ?? null;
+}
+
+function resolveModel(
+  models: CodexModelOption[],
+  requestedModel?: string | null
+) {
+  if (requestedModel) {
+    const exactId = models.find((model) => model.id === requestedModel);
+    if (exactId) {
+      return exactId.id;
+    }
+
+    const exactLabel = models.find((model) => model.label === requestedModel);
+    if (exactLabel) {
+      return exactLabel.id;
+    }
+  }
+
+  return getDefaultModel(models);
 }
 
 function getFallbackResult(request: ServerRequest): CodexServerRequestResult {

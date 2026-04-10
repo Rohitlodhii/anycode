@@ -12,11 +12,13 @@ import { IPC_CHANNELS, inDevelopment } from "./constants";
 import { ipcContext } from "./ipc/context";
 import { AgentManager } from "./main/codex/AgentManager";
 import type { CodexServerRequestResult } from "./main/codex/CodexAgent";
-import { buildFileTreeSync } from "./main/filesystem";
+import { buildFileTree, buildFileTreeSync, flattenFileTree } from "./main/filesystem";
+import type { FileNode } from "./main/filesystem";
 import {
   getLastProjectPath,
   getRecentProjects,
   rememberProject,
+  removeRecentProject,
 } from "./main/project-store";
 import type {
   CodexRequestPayload,
@@ -27,8 +29,12 @@ import type {
   CodexTurnSteerPayload,
 } from "./types/codex-bridge";
 import { getBasePath } from "./utils/path";
+import { logger } from "./utils/logger";
+import { FileWatcher } from "./main/file-watcher";
+
 
 const editorFolders = new Map<number, string>();
+const fileWatcher = new FileWatcher();
 const codexManager = new AgentManager();
 const codexAgentOwners = new Map<string, number>();
 const codexPendingRequests = new Map<
@@ -38,6 +44,14 @@ const codexPendingRequests = new Map<
     resolve: (response: CodexRequestResponse) => void;
   }
 >();
+
+process.on("uncaughtException", (error) => {
+  console.error("[Main] uncaughtException", error);
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("[Main] unhandledRejection", reason);
+});
 
 async function createEditorWindow(folderPath?: string | null) {
   const normalizedFolderPath = folderPath ? path.resolve(folderPath) : null;
@@ -82,9 +96,14 @@ async function createEditorWindow(folderPath?: string | null) {
 
   if (normalizedFolderPath) {
     editorFolders.set(editorWindow.id, normalizedFolderPath);
+    fileWatcher.watchProject(normalizedFolderPath, editorWindow);
   }
 
   editorWindow.on("closed", () => {
+    const folderPath = editorFolders.get(editorWindow.id);
+    if (folderPath) {
+      fileWatcher.unwatchProject(folderPath);
+    }
     editorFolders.delete(editorWindow.id);
 
     for (const [agentId, ownerId] of codexAgentOwners.entries()) {
@@ -110,13 +129,20 @@ async function switchEditorProject(
 ) {
   const normalizedFolderPath = path.resolve(folderPath);
 
+  // Unwatch old project if any
+  const oldFolderPath = editorFolders.get(targetWindow.id);
+  if (oldFolderPath) {
+    fileWatcher.unwatchProject(oldFolderPath);
+  }
+
   await rememberProject(normalizedFolderPath);
   editorFolders.set(targetWindow.id, normalizedFolderPath);
+  fileWatcher.watchProject(normalizedFolderPath, targetWindow);
   targetWindow.webContents.send("editor:setFolder", normalizedFolderPath);
 }
 
 function registerIpcHandlers() {
-  console.log("[CodexDebug][Main] registerIpcHandlers");
+  logger.debug("[Main] registerIpcHandlers");
   ipcMain.handle("dialog:openFolder", async () => {
     const result = await dialog.showOpenDialog({
       properties: ["openDirectory"],
@@ -152,10 +178,14 @@ function registerIpcHandlers() {
     return getRecentProjects();
   });
 
+  ipcMain.handle("projects:removeRecent", async (_event, projectPath: string) => {
+    return removeRecentProject(projectPath);
+  });
+
   ipcMain.handle(
     "codex:agent:ensure",
     async (event, payload: { agentId: string; cwd: string }) => {
-      console.log("[CodexDebug][Main] codex:agent:ensure", payload);
+      logger.debug("[Main] codex:agent:ensure");
       const targetWindow = BrowserWindow.fromWebContents(event.sender);
       if (!targetWindow) {
         throw new Error("Unable to resolve the active window for Codex.");
@@ -174,11 +204,15 @@ function registerIpcHandlers() {
     "codex:agent:send",
     async (
       _event,
-      payload: { agentId: string; model?: string | null; text: string }
+      payload: { agentId: string; model?: string | null; text: string; collaborationMode?: string | null; approvalPolicy?: string | null; effort?: string | null; attachments?: string[] }
     ) => {
-      console.log("[CodexDebug][Main] codex:agent:send", payload);
+      logger.debug("[Main] codex:agent:send");
       await codexManager.send(payload.agentId, payload.text, {
         model: payload.model ?? null,
+        collaborationMode: payload.collaborationMode ?? null,
+        approvalPolicy: payload.approvalPolicy ?? null,
+        effort: payload.effort ?? null,
+        attachments: payload.attachments ?? [],
       });
     }
   );
@@ -188,7 +222,7 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("codex:agent:kill", async (_event, agentId: string) => {
-    console.log("[CodexDebug][Main] codex:agent:kill", { agentId });
+    logger.debug("[Main] codex:agent:kill");
     codexManager.kill(agentId);
     codexAgentOwners.delete(agentId);
   });
@@ -196,7 +230,7 @@ function registerIpcHandlers() {
   ipcMain.handle(
     "codex:request:respond",
     async (_event, response: CodexRequestResponse) => {
-      console.log("[CodexDebug][Main] codex:request:respond", response);
+      logger.debug("[Main] codex:request:respond");
       const key = getCodexRequestKey(response.agentId, response.requestId);
       const pending = codexPendingRequests.get(key);
       if (!pending) {
@@ -211,7 +245,7 @@ function registerIpcHandlers() {
   ipcMain.handle(
     "codex:session:create",
     async (event, payload: CodexSessionCreatePayload) => {
-      console.log("[CodexDebug][Main] codex:session:create", payload);
+      logger.debug("[Main] codex:session:create");
       const targetWindow = BrowserWindow.fromWebContents(event.sender);
       if (!targetWindow) {
         throw new Error("Unable to resolve the active window for Codex.");
@@ -229,7 +263,7 @@ function registerIpcHandlers() {
   ipcMain.handle(
     "codex:rpc:call",
     async (_event, payload: CodexRpcCallPayload) => {
-      console.log("[CodexDebug][Main] codex:rpc:call", payload);
+      logger.debug("[Main] codex:rpc:call", { method: payload.method });
       const agent = codexManager["agents"].get(payload.agentId);
       if (!agent) {
         throw new Error(`No Codex agent found for ${payload.agentId}`);
@@ -243,7 +277,7 @@ function registerIpcHandlers() {
   ipcMain.handle(
     "codex:turn:interrupt",
     async (_event, payload: CodexTurnInterruptPayload) => {
-      console.log("[CodexDebug][Main] codex:turn:interrupt", payload);
+      logger.debug("[Main] codex:turn:interrupt");
       const agent = codexManager["agents"].get(payload.agentId);
       if (!agent) {
         throw new Error(`No Codex agent found for ${payload.agentId}`);
@@ -259,7 +293,7 @@ function registerIpcHandlers() {
   ipcMain.handle(
     "codex:turn:steer",
     async (_event, payload: CodexTurnSteerPayload) => {
-      console.log("[CodexDebug][Main] codex:turn:steer", payload);
+      logger.debug("[Main] codex:turn:steer");
       const agent = codexManager["agents"].get(payload.agentId);
       if (!agent) {
         throw new Error(`No Codex agent found for ${payload.agentId}`);
@@ -279,6 +313,18 @@ function registerIpcHandlers() {
       return null;
     }
     return buildFileTreeSync(folderPath);
+  });
+
+  ipcMain.handle("fs:listFiles", async (_event, rootPath: string): Promise<string[]> => {
+    if (!rootPath) {
+      return [];
+    }
+    try {
+      const tree = await buildFileTree(rootPath);
+      return flattenFileTree(tree);
+    } catch {
+      return [];
+    }
   });
 
   ipcMain.handle("fs:readFile", async (_event, filePath: string) => {
@@ -332,6 +378,17 @@ function registerIpcHandlers() {
     }
   );
 
+  ipcMain.handle(
+    "editor:openFile",
+    async (event, payload: { path: string; line?: number }) => {
+      const targetWindow = BrowserWindow.fromWebContents(event.sender);
+      if (!targetWindow) {
+        return;
+      }
+      targetWindow.webContents.send("editor:openFile", payload);
+    }
+  );
+
   ipcMain.handle("window:minimize", (event) => {
     const targetWindow = BrowserWindow.fromWebContents(event.sender);
     targetWindow?.minimize();
@@ -375,7 +432,7 @@ async function restoreLastProjectOrShowHome() {
   ]);
 
   if (sessionResult.status === "rejected") {
-    console.error("[CodexDebug][Main] startup session failed:", sessionResult.reason);
+    logger.error("[Main] startup session failed", sessionResult.reason);
     // Silently swallow — renderer will show "idle" until the user reconnects.
     return;
   }
@@ -401,9 +458,9 @@ async function restoreLastProjectOrShowHome() {
 async function installExtensions() {
   try {
     const result = await installExtension(REACT_DEVELOPER_TOOLS);
-    console.log(`Extensions installed successfully: ${result.name}`);
+    logger.debug("[Main] extensions installed", { name: result.name });
   } catch {
-    console.error("Failed to install extensions");
+    logger.debug("[Main] failed to install extensions");
   }
 }
 
@@ -417,11 +474,11 @@ function checkForUpdates() {
 }
 
 async function setupORPC() {
-  console.log("[Debug][ORPC][Main] setup:start");
+  logger.debug("[ORPC][Main] setup:start");
   const { rpcHandler } = await import("./ipc/handler");
 
   ipcMain.on(IPC_CHANNELS.START_ORPC_SERVER, (event) => {
-    console.log("[Debug][ORPC][Main] setup:port-received");
+    logger.debug("[ORPC][Main] setup:port-received");
     const [serverPort] = event.ports;
 
     serverPort.start();
@@ -430,27 +487,42 @@ async function setupORPC() {
 }
 
 function registerCodexManagerEvents() {
-  console.log("[CodexDebug][Main] registerCodexManagerEvents");
+  logger.debug("[Main] registerCodexManagerEvents");
   codexManager.onEvent = (agentId, event) => {
-    console.log("[CodexDebug][Main] manager:event", { agentId, event });
+    logger.debug("[Main] manager:event", { agentId, method: event.method });
     const ownerId = codexAgentOwners.get(agentId);
     if (!ownerId) {
       return;
     }
 
     const targetWindow = BrowserWindow.fromId(ownerId);
-    targetWindow?.webContents.send("codex:event", {
-      agentId,
-      method: event.method,
-      params: event.params,
-    });
+    if (!targetWindow || targetWindow.isDestroyed() || targetWindow.webContents.isDestroyed()) {
+      logger.warn("[Main] manager:event dropped: target window unavailable", {
+        agentId,
+        ownerId,
+      });
+      return;
+    }
+
+    try {
+      targetWindow.webContents.send("codex:event", {
+        agentId,
+        method: event.method,
+        params: event.params,
+      });
+    } catch (error) {
+      logger.error("[Main] manager:event forward failed", {
+        agentId,
+        error,
+      });
+    }
   };
 
   codexManager.onRequest = async (agentId, request) => {
-    console.log("[CodexDebug][Main] manager:request", { agentId, request });
+    logger.debug("[Main] manager:request", { agentId, method: request.method });
     const ownerId = codexAgentOwners.get(agentId);
     const targetWindow = ownerId ? BrowserWindow.fromId(ownerId) : null;
-    if (!targetWindow) {
+    if (!targetWindow || targetWindow.isDestroyed() || targetWindow.webContents.isDestroyed()) {
       throw new Error("No window is available to review the Codex request.");
     }
 
@@ -458,18 +530,23 @@ function registerCodexManagerEvents() {
     const response = await new Promise<CodexRequestResponse>((resolve, reject) => {
       const key = getCodexRequestKey(agentId, requestPayload.requestId);
       codexPendingRequests.set(key, { reject, resolve });
-      console.log("[CodexDebug][Main] manager:request:forward", requestPayload);
-      targetWindow.webContents.send("codex:request", requestPayload);
+      logger.debug("[Main] manager:request:forward");
+      try {
+        targetWindow.webContents.send("codex:request", requestPayload);
+      } catch (error) {
+        codexPendingRequests.delete(key);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
     });
 
-    console.log("[CodexDebug][Main] manager:request:resolved", response);
+    logger.debug("[Main] manager:request:resolved");
     return resolveCodexRequest(request, response);
   };
 }
 
 app.whenReady().then(async () => {
   try {
-    console.log("[Debug][Main] app.whenReady");
+    logger.debug("[Main] app.whenReady");
     registerIpcHandlers();
     registerCodexManagerEvents();
     // Create window first, which registers it with IPC context

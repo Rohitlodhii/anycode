@@ -3,6 +3,14 @@ import { persist } from "zustand/middleware";
 import type { CodexAgentSession, CodexModelOption, CodexRequestPayload } from "@/types/codex-bridge";
 
 // ---------------------------------------------------------------------------
+// Settings types
+// ---------------------------------------------------------------------------
+
+export type CollaborationModeKind = "plan" | "default";
+export type ApprovalPolicyKind = "untrusted" | "never";
+export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh";
+
+// ---------------------------------------------------------------------------
 // Item types
 // ---------------------------------------------------------------------------
 
@@ -67,6 +75,29 @@ export type ContextCompactionItem = {
   type: "contextCompaction";
 };
 
+export type FuzzyFileSearchItem = {
+  id: string;
+  type: "fuzzyFileSearch";
+  sessionId: string;
+  query: string;
+  status: "inProgress" | "completed";
+  files: Array<{
+    fileName: string;
+    path: string;
+    root: string;
+    score: number;
+    indices?: number[] | null;
+  }>;
+};
+
+export type TurnDiffItem = {
+  id: string;
+  type: "turnDiff";
+  threadId: string;
+  turnId: string;
+  diff: string;
+};
+
 export type TurnItem =
   | CommandItem
   | FileChangeItem
@@ -74,7 +105,13 @@ export type TurnItem =
   | WebSearchItem
   | ReasoningItem
   | PlanItem
-  | ContextCompactionItem;
+  | ContextCompactionItem
+  | FuzzyFileSearchItem
+  | TurnDiffItem;
+
+export type TimelineEntry =
+  | { kind: "message"; id: string; createdAt: number }
+  | { kind: "item"; id: string; createdAt: number };
 
 // ---------------------------------------------------------------------------
 // Message
@@ -85,6 +122,8 @@ export type ChatMessage = {
   role: "user" | "assistant" | "system";
   content: string;
   createdAt: number;
+  /** Only for assistant messages (best-effort from Codex). */
+  phase?: "commentary" | "final_answer" | null;
   /** Skill names invoked in this message (e.g. ["my-skill"]) */
   skillNames?: string[];
 };
@@ -120,6 +159,10 @@ export type Session = {
   status: SessionStatus;
   errorMessage?: string;
   messages: ChatMessage[];
+  /** Interleaved display order of messages and items (first-seen order). */
+  timeline: TimelineEntry[];
+  /** First-seen timestamps for items, for stable ordering without mutating items. */
+  itemCreatedAt: Record<string, number>;
   /** Keyed by item.id */
   items: Record<string, TurnItem>;
   currentTurnId: string | null;
@@ -132,6 +175,9 @@ export type Session = {
   authState: AuthState;
   createdAt: number;
   isArchived: boolean;
+  collaborationMode: CollaborationModeKind;
+  approvalPolicy: ApprovalPolicyKind;
+  reasoningEffort: ReasoningEffort;
 };
 
 // Persisted subset — messages and items are in-memory only
@@ -142,6 +188,9 @@ export type SessionMeta = {
   threadId: string | null;
   createdAt: number;
   isArchived: boolean;
+  collaborationMode: CollaborationModeKind;
+  approvalPolicy: ApprovalPolicyKind;
+  reasoningEffort: ReasoningEffort;
 };
 
 // ---------------------------------------------------------------------------
@@ -151,6 +200,7 @@ export type SessionMeta = {
 export type SessionStoreState = {
   sessions: Record<string, Session>;
   activeSessionId: string | null;
+  hasHydrated: boolean;
 
   // Session lifecycle
   createSession: (projectPath: string) => string;
@@ -160,7 +210,9 @@ export type SessionStoreState = {
   setSessionReady: (sessionId: string, data: CodexAgentSession) => void;
   setSessionError: (sessionId: string, message: string) => void;
   setSessionArchived: (sessionId: string, archived: boolean) => void;
+  archiveSessionsForProject: (projectPath: string) => void;
   setSessionConnecting: (sessionId: string) => void;
+  setHasHydrated: (hydrated: boolean) => void;
 
   // Messages
   appendMessage: (sessionId: string, message: ChatMessage) => void;
@@ -181,10 +233,51 @@ export type SessionStoreState = {
   setRateLimits: (sessionId: string, limits: RateLimit[]) => void;
   setAuthState: (sessionId: string, auth: AuthState) => void;
 
+  // Session settings
+  setCollaborationMode: (sessionId: string, mode: CollaborationModeKind) => void;
+  setApprovalPolicy: (sessionId: string, policy: ApprovalPolicyKind) => void;
+  setReasoningEffort: (sessionId: string, effort: ReasoningEffort) => void;
+
   // Selectors
   getSessionsForProject: (projectPath: string) => Session[];
   hasStreamingSession: (projectPath: string) => boolean;
 };
+
+// ---------------------------------------------------------------------------
+// Utility: reasoning effort filter
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the subset of ALL_REASONING_EFFORTS that are supported by the given model.
+ * An effort is included iff it appears in model.supportedReasoningEfforts[].reasoningEffort.
+ */
+export const ALL_REASONING_EFFORTS: ReasoningEffort[] = ["none", "low", "medium", "high", "xhigh"];
+
+export type ModelWithReasoningSupport = {
+  supportedReasoningEfforts: Array<{ reasoningEffort: ReasoningEffort }>;
+  defaultReasoningEffort: ReasoningEffort;
+};
+
+export function filterReasoningEfforts(
+  model: ModelWithReasoningSupport
+): ReasoningEffort[] {
+  const supported = new Set(model.supportedReasoningEfforts.map((e) => e.reasoningEffort));
+  return ALL_REASONING_EFFORTS.filter((e) => supported.has(e));
+}
+
+/**
+ * Given a model and the current reasoning effort, returns the effort that
+ * should be used after a model change:
+ * - If the current effort is supported by the new model, keep it.
+ * - Otherwise, reset to the model's defaultReasoningEffort.
+ */
+export function applyModelChangeEffort(
+  model: ModelWithReasoningSupport,
+  currentEffort: ReasoningEffort
+): ReasoningEffort {
+  const supported = new Set(model.supportedReasoningEfforts.map((e) => e.reasoningEffort));
+  return supported.has(currentEffort) ? currentEffort : model.defaultReasoningEffort;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -209,6 +302,8 @@ function makeEmptySession(id: string, projectPath: string, name: string): Sessio
     name,
     status: "connecting",
     messages: [],
+    timeline: [],
+    itemCreatedAt: {},
     items: {},
     currentTurnId: null,
     threadId: null,
@@ -220,6 +315,9 @@ function makeEmptySession(id: string, projectPath: string, name: string): Sessio
     authState: null,
     createdAt: Date.now(),
     isArchived: false,
+    collaborationMode: "default",
+    approvalPolicy: "untrusted",
+    reasoningEffort: "medium",
   };
 }
 
@@ -241,6 +339,7 @@ export const useSessionStore = create<SessionStoreState>()(
     (set, get) => ({
       sessions: {},
       activeSessionId: null,
+      hasHydrated: false,
 
       // --- Session lifecycle ---
 
@@ -335,6 +434,30 @@ export const useSessionStore = create<SessionStoreState>()(
         });
       },
 
+      archiveSessionsForProject: (projectPath) => {
+        set((state) => {
+          const updates: Record<string, Session> = {};
+          let changed = false;
+          for (const [id, session] of Object.entries(state.sessions)) {
+            if (session.projectPath === projectPath && !session.isArchived) {
+              updates[id] = { ...session, isArchived: true };
+              changed = true;
+            }
+          }
+          if (!changed) return state;
+          return {
+            sessions: {
+              ...state.sessions,
+              ...updates,
+            },
+            activeSessionId:
+              state.activeSessionId && updates[state.activeSessionId]
+                ? null
+                : state.activeSessionId,
+          };
+        });
+      },
+
       setSessionConnecting: (sessionId) => {
         set((state) => {
           const session = state.sessions[sessionId];
@@ -352,18 +475,29 @@ export const useSessionStore = create<SessionStoreState>()(
         });
       },
 
+      setHasHydrated: (hydrated) => {
+        set({ hasHydrated: hydrated });
+      },
+
       // --- Messages ---
 
       appendMessage: (sessionId, message) => {
         set((state) => {
           const session = state.sessions[sessionId];
           if (!session) return state;
+          const timeline = session.timeline ?? [];
+          const nextTimeline = timeline.some(
+            (e) => e.kind === "message" && e.id === message.id
+          )
+            ? timeline
+            : [...timeline, { kind: "message", id: message.id, createdAt: message.createdAt }];
           return {
             sessions: {
               ...state.sessions,
               [sessionId]: {
                 ...session,
                 messages: [...session.messages, message],
+                timeline: nextTimeline,
               },
             },
           };
@@ -425,12 +559,24 @@ export const useSessionStore = create<SessionStoreState>()(
         set((state) => {
           const session = state.sessions[sessionId];
           if (!session) return state;
+          const timeline = session.timeline ?? [];
+          const createdAt = session.itemCreatedAt?.[item.id] ?? Date.now();
+          const nextTimeline = timeline.some(
+            (e) => e.kind === "item" && e.id === item.id
+          )
+            ? timeline
+            : [...timeline, { kind: "item", id: item.id, createdAt }];
           return {
             sessions: {
               ...state.sessions,
               [sessionId]: {
                 ...session,
                 items: { ...session.items, [item.id]: item },
+                itemCreatedAt: {
+                  ...(session.itemCreatedAt ?? {}),
+                  [item.id]: createdAt,
+                },
+                timeline: nextTimeline,
               },
             },
           };
@@ -548,6 +694,47 @@ export const useSessionStore = create<SessionStoreState>()(
         });
       },
 
+      // --- Session settings ---
+
+      setCollaborationMode: (sessionId, mode) => {
+        set((state) => {
+          const session = state.sessions[sessionId];
+          if (!session) return state;
+          return {
+            sessions: {
+              ...state.sessions,
+              [sessionId]: { ...session, collaborationMode: mode },
+            },
+          };
+        });
+      },
+
+      setApprovalPolicy: (sessionId, policy) => {
+        set((state) => {
+          const session = state.sessions[sessionId];
+          if (!session) return state;
+          return {
+            sessions: {
+              ...state.sessions,
+              [sessionId]: { ...session, approvalPolicy: policy },
+            },
+          };
+        });
+      },
+
+      setReasoningEffort: (sessionId, effort) => {
+        set((state) => {
+          const session = state.sessions[sessionId];
+          if (!session) return state;
+          return {
+            sessions: {
+              ...state.sessions,
+              [sessionId]: { ...session, reasoningEffort: effort },
+            },
+          };
+        });
+      },
+
       // --- Selectors ---
 
       getSessionsForProject: (projectPath) => {
@@ -577,6 +764,9 @@ export const useSessionStore = create<SessionStoreState>()(
               threadId: session.threadId,
               createdAt: session.createdAt,
               isArchived: session.isArchived,
+              collaborationMode: session.collaborationMode,
+              approvalPolicy: session.approvalPolicy,
+              reasoningEffort: session.reasoningEffort,
             } satisfies SessionMeta,
           ])
         ),
@@ -591,6 +781,9 @@ export const useSessionStore = create<SessionStoreState>()(
             threadId: meta.threadId,
             createdAt: meta.createdAt,
             isArchived: meta.isArchived,
+            collaborationMode: meta.collaborationMode ?? "default",
+            approvalPolicy: meta.approvalPolicy ?? "untrusted",
+            reasoningEffort: meta.reasoningEffort ?? "medium",
             status: "idle",
           };
         }
@@ -599,6 +792,9 @@ export const useSessionStore = create<SessionStoreState>()(
           sessions: rehydrated,
           activeSessionId: p.activeSessionId ?? null,
         };
+      },
+      onRehydrateStorage: () => (state) => {
+        state?.setHasHydrated(true);
       },
     }
   )

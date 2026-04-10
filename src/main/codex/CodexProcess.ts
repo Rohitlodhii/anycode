@@ -3,6 +3,7 @@ import path from "node:path";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createInterface } from "node:readline";
+import { logger } from "@/utils/logger";
 
 export class CodexProcess extends EventEmitter<{
   error: [error: Error];
@@ -25,8 +26,7 @@ export class CodexProcess extends EventEmitter<{
       ? ["/c", resolvedCodexBin, "app-server"]
       : ["app-server"];
     
-    console.log("[CodexDebug][Process] spawning", {
-      codexBin,
+    logger.debug("[Codex][Process] spawning", {
       platform: process.platform,
       resolvedCodexBin,
       spawnCommand,
@@ -37,7 +37,7 @@ export class CodexProcess extends EventEmitter<{
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
-    console.log("[CodexDebug][Process] spawned", {
+    logger.debug("[Codex][Process] spawned", {
       pid: this.proc.pid,
       resolvedCodexBin,
     });
@@ -52,7 +52,7 @@ export class CodexProcess extends EventEmitter<{
       try {
         this.emit("message", JSON.parse(trimmed));
       } catch (error) {
-        console.error("[CodexDebug][Process] invalid JSON from codex", {
+        logger.error("[Codex][Process] invalid JSON from codex", {
           error: String(error),
           trimmed,
         });
@@ -64,8 +64,13 @@ export class CodexProcess extends EventEmitter<{
     });
 
     this.proc.stderr.on("data", (chunk) => {
-      console.log("[CodexDebug][Process][stderr]", chunk.toString());
+      // Stderr is surfaced to the UI via events; do not log verbosely.
+      logger.debug("[Codex][Process][stderr]", chunk.toString());
       this.emit("stderr", chunk.toString());
+    });
+    this.proc.stdin.on("error", (error) => {
+      logger.error("[Codex][Process] stdin error", { error: String(error) });
+      this.emit("error", error instanceof Error ? error : new Error(String(error)));
     });
 
     this.proc.on("error", (error) => {
@@ -74,7 +79,7 @@ export class CodexProcess extends EventEmitter<{
         spawnError.code === "ENOENT"
           ? `Unable to start Codex. Tried executable: ${resolvedCodexBin}`
           : error.message;
-      console.error("[CodexDebug][Process] spawn error", {
+      logger.error("[Codex][Process] spawn error", {
         code: spawnError.code,
         message,
         resolvedCodexBin,
@@ -83,7 +88,7 @@ export class CodexProcess extends EventEmitter<{
     });
 
     this.proc.on("exit", (code) => {
-      console.log("[CodexDebug][Process] exit", { code, pid: this.proc.pid });
+      logger.debug("[Codex][Process] exit", { code, pid: this.proc.pid });
       this.emit("exit", code);
     });
   }
@@ -95,8 +100,16 @@ export class CodexProcess extends EventEmitter<{
   }
 
   send(message: unknown) {
-    console.log("[CodexDebug][Process] send", message);
-    this.proc.stdin.write(`${JSON.stringify(message)}\n`);
+    logger.debug("[Codex][Process] send");
+    if (!this.proc.stdin.writable || this.proc.stdin.destroyed) {
+      this.emit("error", new Error("Cannot send to Codex process: stdin is not writable"));
+      return;
+    }
+    try {
+      this.proc.stdin.write(`${JSON.stringify(message)}\n`);
+    } catch (error) {
+      this.emit("error", error instanceof Error ? error : new Error(String(error)));
+    }
   }
 }
 
@@ -116,7 +129,7 @@ function resolveCodexBinary(codexBin: string) {
   ].filter(Boolean) as string[];
 
   const resolved = candidates.find((candidate) => existsSync(candidate));
-  console.log("[CodexDebug][Process] binary resolution", {
+  logger.debug("[Codex][Process] binary resolution", {
     candidates: candidates.slice(0, 5),
     resolved,
   });

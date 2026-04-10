@@ -12,15 +12,19 @@ test("renders ToggleTheme", () => {
 test("has icon", () => {
   const { getByRole } = render(<ToggleTheme />);
   const button = getByRole("button");
-  const icon = button.querySelector("svg");
+  const icons = button.querySelectorAll("svg");
 
-  expect(icon).toBeInTheDocument();
+  expect(icons).toHaveLength(2);
 });
 
-test("is moon icon", () => {
-  const svgIconClassName: string = "lucide-moon";
+test("defaults to a dark-mode toggle", () => {
   const { getByRole } = render(<ToggleTheme />);
-  const svg = getByRole("button").querySelector("svg");
+  const button = getByRole("button");
+  const iconClassNames = Array.from(button.querySelectorAll("svg")).map((icon) =>
+    icon.getAttribute("class")
+  );
 
-  expect(svg?.classList).toContain(svgIconClassName);
+  expect(button).toHaveAccessibleName("Switch to light mode");
+  expect(iconClassNames.some((value) => value?.includes("lucide-moon"))).toBe(true);
+  expect(iconClassNames.some((value) => value?.includes("lucide-sun"))).toBe(true);
 });

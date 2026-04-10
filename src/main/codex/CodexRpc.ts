@@ -7,6 +7,7 @@ import type {
   ServerRequest,
 } from "@/codex-schema";
 import { CodexProcess } from "./CodexProcess";
+import { logger, logCodexRpc } from "@/main/logger";
 
 type JsonRpcSuccess = {
   id: RequestId;
@@ -25,6 +26,8 @@ type JsonRpcError = {
 type JsonRpcMessage = JsonRpcError | JsonRpcSuccess | ServerNotification | ServerRequest;
 
 type PendingRequest = {
+  method: ClientRequest["method"];
+  params: unknown;
   reject: (error: Error) => void;
   resolve: (value: unknown) => void;
 };
@@ -63,7 +66,7 @@ export class CodexRpc {
   }
 
   async initialize(clientName: string, version: string) {
-    console.log("[CodexDebug][Rpc] initialize:start", { clientName, version });
+    logCodexRpc("initialize:start", { clientName, version });
     const response = await this.request<InitializeResponse>("initialize", {
       capabilities: {
         experimentalApi: true,
@@ -77,7 +80,7 @@ export class CodexRpc {
     });
 
     this.notify("initialized");
-    console.log("[CodexDebug][Rpc] initialize:done", response);
+    logCodexRpc("initialize:done", response);
     return response;
   }
 
@@ -86,7 +89,7 @@ export class CodexRpc {
   }
 
   notify(method: ClientNotification["method"], params?: unknown) {
-    console.log("[CodexDebug][Rpc] notify", { method, params });
+    logCodexRpc(method, params);
     if (typeof params === "undefined") {
       this.process.send({ method });
       return;
@@ -100,10 +103,12 @@ export class CodexRpc {
     params: Extract<ClientRequest, { method: typeof method }>["params"]
   ) {
     const id = this.nextId++;
-    console.log("[CodexDebug][Rpc] request:start", { id, method, params });
+    logCodexRpc(`request:${method}`, { id });
 
     return new Promise<TResponse>((resolve, reject) => {
       this.pending.set(id, {
+        method,
+        params,
         reject,
         resolve: resolve as (value: unknown) => void,
       });
@@ -127,7 +132,10 @@ export class CodexRpc {
   }
 
   private async route(message: JsonRpcMessage) {
-    console.log("[CodexDebug][Rpc] route", message);
+    logCodexRpc("route", {
+      // Avoid logging full message payloads.
+      kind: "method" in message ? "server" : "response",
+    });
     if ("method" in message) {
       if ("id" in message) {
         await this.onServerRequest?.(message);
@@ -146,15 +154,16 @@ export class CodexRpc {
     this.pending.delete(message.id);
 
     if ("error" in message) {
-      console.error("[CodexDebug][Rpc] request:error", message);
+      logger.error("[Codex][Rpc] request:error", {
+        error: message.error,
+        id: message.id,
+        method: pending.method,
+      });
       pending.reject(new Error(message.error.message));
       return;
     }
 
-    console.log("[CodexDebug][Rpc] request:success", {
-      id: message.id,
-      result: message.result,
-    });
+    logCodexRpc(`request:success:${pending.method}`, { id: message.id });
     pending.resolve(message.result);
   }
 }

@@ -1,11 +1,12 @@
 import { ipc } from "@/ipc/manager";
+import { logger } from "@/utils/logger";
 
 export function getPlatform() {
-  console.log("[Debug][Platform] request:getPlatform");
+  logger.debug("[Platform] request:getPlatform");
   return ipc.client.app.currentPlatfom();
 }
 
 export function getAppVersion() {
-  console.log("[Debug][Platform] request:getAppVersion");
+  logger.debug("[Platform] request:getAppVersion");
   return ipc.client.app.appVersion();
 }

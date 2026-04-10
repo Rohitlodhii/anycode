@@ -151,6 +151,19 @@ export async function getRecentProjects() {
   return state.recentProjects;
 }
 
+export async function removeRecentProject(projectPath: string) {
+  const normalizedPath = normalizeProjectPath(projectPath);
+  const currentState = await loadState();
+  const nextState: ProjectHistoryState = {
+    lastProjectPath:
+      currentState.lastProjectPath === normalizedPath ? null : currentState.lastProjectPath,
+    recentProjects: currentState.recentProjects.filter((p) => p.path !== normalizedPath),
+  };
+  const normalizedNext = await normalizeState(nextState);
+  await writeState(normalizedNext);
+  return normalizedNext.recentProjects;
+}
+
 export async function getLastProjectPath() {
   const state = await loadState();
   return state.lastProjectPath;

@@ -10,6 +10,7 @@ type CodexEventPayload = import("./types/codex-bridge").CodexEventPayload;
 type CodexRequestPayload = import("./types/codex-bridge").CodexRequestPayload;
 type CodexRequestResponse = import("./types/codex-bridge").CodexRequestResponse;
 type CodexSessionReadyPayload = import("./types/codex-bridge").CodexSessionReadyPayload;
+type EditorOpenFilePayload = import("./types/codex-bridge").EditorOpenFilePayload;
 
 interface Window {
   api: {
@@ -17,6 +18,7 @@ interface Window {
     openProject: (folderPath: string) => Promise<void>;
     getEditorFolder: () => Promise<string | null>;
     getRecentProjects: () => Promise<RecentProject[]>;
+    removeRecentProject: (projectPath: string) => Promise<RecentProject[]>;
     onEditorFolder: (
       callback: (folderPath: string) => void
     ) => () => void;
@@ -30,6 +32,7 @@ interface Window {
     rename: (targetPath: string, newName: string) => Promise<string>;
     delete: (targetPath: string) => Promise<void>;
     move: (sourcePath: string, destinationFolder: string) => Promise<string>;
+    listFiles: (rootPath: string) => Promise<string[]>;
     minimizeWindow: () => Promise<void>;
     toggleMaximizeWindow: () => Promise<void>;
     closeWindow: () => Promise<void>;
@@ -46,7 +49,11 @@ interface Window {
     sendMessage: (
       agentId: string,
       text: string,
-      model?: string | null
+      model?: string | null,
+      collaborationMode?: string | null,
+      approvalPolicy?: string | null,
+      effort?: string | null,
+      attachments?: string[]
     ) => Promise<void>;
     createSession: (sessionId: string, cwd: string) => Promise<CodexAgentSession>;
     rpcCall: (agentId: string, method: string, params: unknown) => Promise<unknown>;
@@ -60,5 +67,10 @@ interface Window {
     onSessionReady: (
       callback: (payload: CodexSessionReadyPayload) => void
     ) => () => void;
+  };
+  editor: {
+    openFile: (payload: EditorOpenFilePayload) => Promise<void>;
+    onOpenFile: (callback: (payload: EditorOpenFilePayload) => void) => () => void;
+    onFileChanged: (callback: (payload: { path: string }) => void) => () => void;
   };
 }

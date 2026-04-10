@@ -43,11 +43,15 @@ interface AIModelOption {
 interface AIPromptProps {
   className?: string;
   disabled?: boolean;
+  footerControls?: ReactNode;
   isSubmitting?: boolean;
+  modelPickerOpen?: boolean;
   models?: AIModelOption[];
+  onModelPickerOpenChange?: (open: boolean) => void;
   onModelChange?: (model: string) => void;
-  onSubmit?: (payload: { message: string; model: string }) => void;
+  onSubmit?: (payload: { message: string; model: string; attachments?: string[] }) => void;
   onValueChange?: (value: string) => void;
+  onKeyDown?: (e: React.KeyboardEvent) => void;
   placeholder?: string;
   selectedModel?: string;
   /** Controlled value; when provided the component becomes semi-controlled */
@@ -131,17 +135,23 @@ function useAutoResizeTextarea({
 export function AI_Prompt({
   className,
   disabled = false,
+  footerControls,
   isSubmitting = false,
+  modelPickerOpen,
   models = DEFAULT_MODELS,
+  onModelPickerOpenChange,
   onModelChange,
   onSubmit,
   onValueChange,
+  onKeyDown: onKeyDownProp,
   placeholder = "What can I do for you?",
   selectedModel,
   value: controlledValue,
   wrapperRef,
 }: AIPromptProps) {
   const [value, setValue] = useState(controlledValue ?? "");
+  const [attachments, setAttachments] = useState<string[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Sync when controlled value changes externally (e.g. skill injection)
   useEffect(() => {
@@ -183,13 +193,19 @@ export function AI_Prompt({
     onSubmit?.({
       message,
       model: activeModel,
+      attachments: attachments.length > 0 ? [...attachments] : undefined,
     });
     setValue("");
+    setAttachments([]);
     adjustHeight(true);
     onValueChange?.("");
-  }, [activeModel, adjustHeight, disabled, isSubmitting, onSubmit, value]);
+  }, [activeModel, adjustHeight, attachments, disabled, isSubmitting, onSubmit, value]);
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Let external handler (e.g. slash command navigation) intercept first
+    onKeyDownProp?.(event);
+    if (event.defaultPrevented) return;
+
     if (
       event.key === "Enter" &&
       !event.shiftKey &&
@@ -228,8 +244,11 @@ export function AI_Prompt({
 
             <div className="flex h-14 items-center border-t border-border/60 bg-muted/20">
               <div className="absolute right-3 bottom-3 left-3 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <DropdownMenu>
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <DropdownMenu
+                    open={modelPickerOpen}
+                    onOpenChange={onModelPickerOpenChange}
+                  >
                     <DropdownMenuTrigger asChild>
                       <Button
                         className="h-8 gap-1 rounded-md pl-2 pr-2 text-xs"
@@ -291,9 +310,58 @@ export function AI_Prompt({
                       "cursor-pointer rounded-lg border border-transparent p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                     )}
                   >
-                    <input className="hidden" type="file" />
+                    <input
+                      className="hidden"
+                      ref={fileInputRef}
+                      type="file"
+                      multiple
+                      accept="image/*,.pdf,.txt,.md,.csv,.json"
+                      onChange={(e) => {
+                        const files = Array.from(e.target.files ?? []);
+                        const paths = files
+                          .map((f) => (f as File & { path?: string }).path)
+                          .filter((p): p is string => Boolean(p));
+                        if (paths.length > 0) {
+                          setAttachments((prev) => [...prev, ...paths]);
+                        }
+                        // reset so same file can be re-selected
+                        e.target.value = "";
+                      }}
+                    />
                     <Paperclip className="size-4" />
                   </label>
+
+                  {attachments.length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {attachments.map((p, i) => (
+                        <span
+                          key={p}
+                          className="flex items-center gap-1 rounded-md border border-border/60 bg-muted px-2 py-0.5 text-xs text-muted-foreground"
+                        >
+                          {p.split(/[\\/]/).pop()}
+                          <button
+                            type="button"
+                            aria-label={`Remove ${p}`}
+                            className="ml-0.5 hover:text-foreground"
+                            onClick={() =>
+                              setAttachments((prev) => prev.filter((_, idx) => idx !== i))
+                            }
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {footerControls ? (
+                    <>
+                      <div className="mx-0.5 h-4 w-px bg-border" />
+                      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
+                        {footerControls}
+                      </div>
+                    </>
+                  ) : null}
                 </div>
 
                 <button

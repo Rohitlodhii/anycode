@@ -192,6 +192,58 @@ Bottom-up implementation: store and types first, then IPC wiring, then event dis
 - [x] 16. Final checkpoint — Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
+- [x] 17. Extend SessionStore with collaboration mode, approval policy, and reasoning effort
+  - Add `collaborationMode: "plan" | "default"` field to `Session` type (default: `"default"`)
+  - Add `approvalPolicy: "untrusted" | "never"` field to `Session` type (default: `"untrusted"`)
+  - Add `reasoningEffort: ReasoningEffort` field to `Session` type (default: `"medium"`)
+  - Implement `setCollaborationMode`, `setApprovalPolicy`, `setReasoningEffort` store actions
+  - Persist all three fields in `SessionMeta` / `partialize` so they survive restarts
+  - Update `makeEmptySession` to initialize all three fields with their defaults
+  - Pass `collaborationMode`, `approvalPolicy`, and `effort` into the `turn/start` payload inside `handleSubmit` in `codex-chat-panel.tsx`
+  - _Requirements: 17.1, 17.5, 18.1, 18.5, 19.1_
+
+- [x] 17.1 Write property test: session settings round-trip (Property 12)
+
+  - **Property 12: Session settings round-trip**
+  - **Validates: Requirements 17.1, 17.5, 18.1, 18.5, 19.1**
+  - Use fast-check: generate random valid values for each setting; call the setter; verify the store reflects the exact value immediately
+
+- [x] 17.2 Write property test: reasoning effort filter (Property 13)
+
+  - **Property 13: Reasoning effort filter respects model support**
+  - **Validates: Requirements 19.3**
+  - Generate random model objects with random `supportedReasoningEfforts` arrays; verify the filter function includes an effort iff it appears in the model's supported list
+
+- [x] 17.3 Write property test: reasoning effort reset on model change (Property 14)
+
+  - **Property 14: Reasoning effort resets to model default when unsupported**
+  - **Validates: Requirements 19.5**
+  - Generate random models and unsupported effort values; apply the model-change handler; verify `reasoningEffort === model.defaultReasoningEffort`
+
+- [x] 18. Build InputBar toolbar controls (mode toggle, access toggle, effort picker)
+  - Add a compact toolbar row in `codex-chat-panel.tsx` between the message list and `AI_Prompt`, visible only when `isConnected`
+  - Mode toggle: two-segment pill ("Plan" / "Chat") — clicking calls `setCollaborationMode`; active segment highlighted
+  - Access toggle: two-segment pill ("Supervised" / "Full Access") — clicking calls `setApprovalPolicy`; active segment highlighted
+  - Effort picker: small dropdown button showing current effort label; popover lists only `model.supportedReasoningEfforts`; selecting calls `setReasoningEffort`; resets to `model.defaultReasoningEffort` when model changes and current effort is unsupported
+  - _Requirements: 17.2, 17.3, 17.4, 18.2, 18.3, 18.4, 19.2, 19.3, 19.4, 19.5_
+
+- [x] 19. Build SlashCommandSystem
+  - Implement `useSlashCommands(inputValue, context)` hook in `src/components/codex/slash-commands.tsx`
+  - Hook sets `isOpen = true` when `inputValue.startsWith("/")`, filters `ALL_COMMANDS` by query suffix (case-insensitive name or description match), tracks `selectedIndex` for ArrowUp/ArrowDown/Enter/Escape keyboard navigation
+  - Define command registry with at minimum: `/model`, `/plan`, `/default`, `/mcp`, `/effort`, `/supervised`, `/full-access` — each with icon, description, and action callback
+  - Implement `SlashCommandCard` component: absolutely positioned with `bottom: calc(100% + 8px)` relative to `inputWrapperRef`, shows icon + bold `/name` + muted description per row, highlights `selectedIndex` row
+  - Wire into `codex-chat-panel.tsx`: render `SlashCommandCard` above `AI_Prompt` when `slashCommands.isOpen && slashCommands.filtered.length > 0`; on selection call `cmd.action()` and clear input
+  - _Requirements: 20.1, 20.2, 20.3, 20.4, 20.5, 20.6, 20.7, 20.8_
+
+- [x] 19.1 Write property test: slash command filter correctness (Property 15)
+
+  - **Property 15: Slash command filter correctness**
+  - **Validates: Requirements 20.2, 20.6**
+  - Generate random input strings; verify filter returns non-empty list iff input starts with `/` and suffix matches at least one command; verify empty list for all non-`/` inputs
+
+- [x] 20. Final checkpoint — Ensure all tests pass
+  - Ensure all tests pass, ask the user if questions arise.
+
 ## Notes
 
 - All tasks are required — comprehensive testing from the start

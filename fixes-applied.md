@@ -28,6 +28,22 @@ Additionally, `.cmd` and `.bat` files cannot be spawned directly on Windows - th
 
 3. **Add debug logging** - Added logging to show which candidates were checked, which one was resolved, and the actual spawn command used.
 
+## Problem 3: Missing Model Field in Turn Start Request
+
+### Root Cause
+When sending a message via `codex:agent:send`, the `model` field was being set to `null` when the model lookup by label failed. The Codex app-server requires a valid `model` field in the `turn/start` request.
+
+### Solution Applied
+Modified `handleSubmit()` in `src/components/codex/codex-chat-panel.tsx` to:
+1. **Fallback chain** - When looking up model by label fails, fallback to:
+   - `session.defaultModel` (the model ID marked as default)
+   - `session.models[0]?.id` (the first available model)
+   - `null` (only if no models exist)
+
+2. **Early validation** - If no model is available after the fallback chain, set an error state and return early instead of attempting to send the message.
+
+This ensures that `window.codex.sendMessage()` is always called with a valid model ID, preventing the "Invalid request: missing field `model`" error.
+
 ## Expected Behavior After Fixes
 
 1. ORPC initialization should complete successfully
@@ -36,9 +52,11 @@ Additionally, `.cmd` and `.bat` files cannot be spawned directly on Windows - th
 4. Chat UI should be able to establish a working Codex session
 5. No more "Main window is not set" errors
 6. No more ENOENT spawn errors for Codex
+7. Messages can be sent successfully with a valid model field
 
 ## Files Modified
 
 - `src/main.ts` - Added window registration and reordered initialization
 - `src/main/codex/CodexProcess.ts` - Fixed binary resolution priority for Windows
 - `src/ipc/window/hadlers.ts` - Deferred context access to runtime
+- `src/components/codex/codex-chat-panel.tsx` - Added model fallback chain and validation

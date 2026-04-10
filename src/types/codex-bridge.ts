@@ -73,3 +73,8 @@ export type CodexSessionReadyPayload = {
   sessionId: string;
   session: CodexAgentSession;
 };
+
+export type EditorOpenFilePayload = {
+  path: string;
+  line?: number;
+};
